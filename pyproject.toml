@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 race-mcp-server = "race_mcp_server.main:main"
+race-mcp-gui = "race_mcp_server.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
