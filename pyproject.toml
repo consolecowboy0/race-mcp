@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "race-mcp-server"
+version = "0.1.0"
+description = "MCP server for iRacing telemetry streaming, racing advice, and car spotting"
+authors = [
+    {name = "Race MCP Team", email = "team@racemcp.dev"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = [
+    "mcp>=1.0.0",
+    "pyirsdk>=1.0.0",  # iRacing SDK
+    "asyncio-mqtt>=0.16.0",  # For MQTT if needed
+    "pydantic>=2.0.0",
+    "aiofiles>=24.0.0",
+    "anyio>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0", 
+    "black>=24.0.0",
+    "isort>=5.0.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+race-mcp-server = "race_mcp_server.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
