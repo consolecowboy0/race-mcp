@@ -6,6 +6,7 @@ providing tools for racing analysis, car spotting, and AI-powered coaching.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,9 +20,13 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
+from .event_handler import MCPEventHandler
+from .openai_client import OpenAIClient
+
 # Try to import pyirsdk, but make it optional for development
 try:
     import pyirsdk
+
     PYIRSDK_AVAILABLE = True
 except ImportError:
     PYIRSDK_AVAILABLE = False
@@ -29,8 +34,7 @@ except ImportError:
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,7 @@ logger.setLevel(getattr(logging, LOG_LEVEL.upper()))
 @dataclass
 class TelemetrySnapshot:
     """Snapshot of current telemetry data"""
+
     timestamp: float
     session_time: float
     lap: int
@@ -65,9 +70,10 @@ class TelemetrySnapshot:
     flag_state: str
 
 
-@dataclass 
+@dataclass
 class CarInfo:
     """Information about a car in the session"""
+
     car_idx: int
     driver_name: str
     position: int
@@ -82,6 +88,7 @@ class CarInfo:
 @dataclass
 class RacingAdvice:
     """Racing advice response structure"""
+
     situation: str
     advice: str
     priority: str  # "low", "medium", "high", "critical"
@@ -91,17 +98,19 @@ class RacingAdvice:
 
 class RaceMCPServer:
     """Main Race MCP Server class"""
-    
+
     def __init__(self):
         self.server = Server("race-mcp-server")
         self.last_telemetry: Optional[TelemetrySnapshot] = None
         self.session_cars: Dict[int, CarInfo] = {}
         self.telemetry_stream_active = False
+        self.openai_client = OpenAIClient()
+        self.event_handler = MCPEventHandler(self.openai_client)
         self.setup_handlers()
-        
+
     def setup_handlers(self):
         """Setup MCP protocol handlers"""
-        
+
         @self.server.list_tools()
         async def list_tools() -> List[types.Tool]:
             """List available racing tools"""
@@ -109,11 +118,7 @@ class RaceMCPServer:
                 types.Tool(
                     name="get_telemetry",
                     description="Get current iRacing telemetry snapshot",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    },
+                    inputSchema={"type": "object", "properties": {}, "required": []},
                     outputSchema={
                         "type": "object",
                         "properties": {
@@ -129,22 +134,22 @@ class RaceMCPServer:
                             "fuel_level": {"type": "number"},
                             "is_on_track": {"type": "boolean"},
                             "session_state": {"type": "string"},
-                            "flag_state": {"type": "string"}
-                        }
-                    }
+                            "flag_state": {"type": "string"},
+                        },
+                    },
                 ),
                 types.Tool(
                     name="spot_cars",
                     description="Get information about cars around the player",
                     inputSchema={
-                        "type": "object", 
+                        "type": "object",
                         "properties": {
                             "radius": {
                                 "type": "number",
                                 "description": "Distance radius to search for cars (meters)",
-                                "default": 100
+                                "default": 100,
                             }
-                        }
+                        },
                     },
                     outputSchema={
                         "type": "object",
@@ -157,32 +162,38 @@ class RaceMCPServer:
                                         "driver_name": {"type": "string"},
                                         "distance": {"type": "number"},
                                         "speed": {"type": "number"},
-                                        "position": {"type": "integer"}
-                                    }
-                                }
+                                        "position": {"type": "integer"},
+                                    },
+                                },
                             },
                             "cars_behind": {"type": "array"},
-                            "cars_alongside": {"type": "array"}
-                        }
-                    }
+                            "cars_alongside": {"type": "array"},
+                        },
+                    },
                 ),
                 types.Tool(
-                    name="get_racing_advice", 
+                    name="get_racing_advice",
                     description="Get AI-powered racing advice based on current telemetry and situation",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "context": {
                                 "type": "string",
-                                "description": "Additional context about what you're looking for advice on"
+                                "description": "Additional context about what you're looking for advice on",
                             },
                             "focus_area": {
                                 "type": "string",
-                                "enum": ["racing_line", "car_control", "strategy", "safety", "general"],
-                                "default": "general"
-                            }
-                        }
-                    }
+                                "enum": [
+                                    "racing_line",
+                                    "car_control",
+                                    "strategy",
+                                    "safety",
+                                    "general",
+                                ],
+                                "default": "general",
+                            },
+                        },
+                    },
                 ),
                 types.Tool(
                     name="analyze_lap",
@@ -192,22 +203,30 @@ class RaceMCPServer:
                         "properties": {
                             "lap_number": {
                                 "type": "integer",
-                                "description": "Specific lap to analyze (default: most recent)"
+                                "description": "Specific lap to analyze (default: most recent)",
                             }
-                        }
-                    }
+                        },
+                    },
                 ),
                 types.Tool(
                     name="track_session",
                     description="Get session information and statistics",
+                    inputSchema={"type": "object", "properties": {}, "required": []},
+                ),
+                types.Tool(
+                    name="send_driver_message",
+                    description="Send a message from the driver to the AI coach",
                     inputSchema={
                         "type": "object",
-                        "properties": {},
-                        "required": []
-                    }
-                )
+                        "properties": {
+                            "message": {"type": "string", "description": "Driver or crew message"}
+                        },
+                        "required": ["message"],
+                    },
+                    outputSchema={"type": "object", "properties": {"response": {"type": "string"}}},
+                ),
             ]
-        
+
         @self.server.call_tool()
         async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             """Handle tool calls"""
@@ -226,40 +245,40 @@ class RaceMCPServer:
                     return await self.analyze_lap(lap_number)
                 elif name == "track_session":
                     return await self.track_session()
+                elif name == "send_driver_message":
+                    message = arguments.get("message", "")
+                    response = await self.event_handler.handle_user_message(message)
+                    return {"response": response}
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as e:
                 logger.error(f"Error in tool {name}: {str(e)}")
-                return {
-                    "error": str(e),
-                    "tool": name,
-                    "timestamp": time.time()
-                }
-        
+                return {"error": str(e), "tool": name, "timestamp": time.time()}
+
         @self.server.list_resources()
         async def list_resources() -> List[types.Resource]:
             """List available resources"""
             return [
                 types.Resource(
                     uri="telemetry://live-stream",
-                    name="Live Telemetry Stream", 
+                    name="Live Telemetry Stream",
                     description="Real-time iRacing telemetry data stream",
-                    mimeType="application/json"
+                    mimeType="application/json",
                 ),
                 types.Resource(
                     uri="session://current-info",
                     name="Current Session Info",
                     description="Information about the current racing session",
-                    mimeType="application/json"
+                    mimeType="application/json",
                 ),
                 types.Resource(
                     uri="track://layout-info",
                     name="Track Layout Information",
                     description="Track layout, sectors, and characteristics",
-                    mimeType="application/json" 
-                )
+                    mimeType="application/json",
+                ),
             ]
-        
+
         @self.server.read_resource()
         async def read_resource(uri: str) -> str:
             """Read resource content"""
@@ -276,7 +295,7 @@ class RaceMCPServer:
             else:
                 logger.error(f"Unknown resource requested: {uri}")
                 return json.dumps({"error": f"Unknown resource: {uri}"}, indent=2)
-        
+
         @self.server.list_prompts()
         async def list_prompts() -> List[types.Prompt]:
             """List available prompt templates"""
@@ -286,16 +305,16 @@ class RaceMCPServer:
                     description="Act as an experienced racing coach providing advice",
                     arguments=[
                         types.PromptArgument(
-                            name="situation", 
+                            name="situation",
                             description="Current racing situation or question",
-                            required=True
+                            required=True,
                         ),
                         types.PromptArgument(
                             name="telemetry_data",
                             description="Current telemetry data to analyze",
-                            required=False
-                        )
-                    ]
+                            required=False,
+                        ),
+                    ],
                 ),
                 types.Prompt(
                     name="car_spotter",
@@ -304,9 +323,9 @@ class RaceMCPServer:
                         types.PromptArgument(
                             name="cars_nearby",
                             description="Information about nearby cars",
-                            required=True
+                            required=True,
                         )
-                    ]
+                    ],
                 ),
                 types.Prompt(
                     name="setup_analyst",
@@ -315,24 +334,24 @@ class RaceMCPServer:
                         types.PromptArgument(
                             name="telemetry_history",
                             description="Historical telemetry data for analysis",
-                            required=True
+                            required=True,
                         ),
                         types.PromptArgument(
                             name="track_conditions",
                             description="Current track conditions",
-                            required=False
-                        )
-                    ]
-                )
+                            required=False,
+                        ),
+                    ],
+                ),
             ]
-        
+
         @self.server.get_prompt()
         async def get_prompt(name: str, arguments: Dict[str, str]) -> types.GetPromptResult:
             """Generate prompt content"""
             if name == "racing_coach":
                 situation = arguments["situation"]
                 telemetry_data = arguments.get("telemetry_data", "")
-                
+
                 prompt_content = f"""You are an experienced racing coach with expertise in motorsports across multiple disciplines. Your role is to provide expert racing advice based on telemetry data and track situations.
 
 Current Situation: {situation}
@@ -351,18 +370,14 @@ Keep your advice clear, concise, and focused on what the driver can implement im
                     description=f"Racing coach advice for: {situation}",
                     messages=[
                         types.PromptMessage(
-                            role="user",
-                            content=types.TextContent(
-                                type="text",
-                                text=prompt_content
-                            )
+                            role="user", content=types.TextContent(type="text", text=prompt_content)
                         )
-                    ]
+                    ],
                 )
-            
+
             elif name == "car_spotter":
                 cars_nearby = arguments["cars_nearby"]
-                
+
                 prompt_content = f"""You are a professional racing spotter providing real-time situational awareness to a race car driver. Your job is to communicate clearly and concisely about nearby traffic and potential hazards.
 
 Nearby Cars Information: {cars_nearby}
@@ -379,18 +394,14 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                     description="Racing spotter call for current track situation",
                     messages=[
                         types.PromptMessage(
-                            role="user", 
-                            content=types.TextContent(
-                                type="text",
-                                text=prompt_content
-                            )
+                            role="user", content=types.TextContent(type="text", text=prompt_content)
                         )
-                    ]
+                    ],
                 )
-            
+
             else:
                 raise ValueError(f"Unknown prompt: {name}")
-    
+
     async def get_telemetry(self) -> Dict[str, Any]:
         """Get current telemetry data"""
         if PYIRSDK_AVAILABLE and pyirsdk.is_connected:
@@ -400,34 +411,34 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                 if telemetry_data:
                     snapshot = TelemetrySnapshot(
                         timestamp=time.time(),
-                        session_time=telemetry_data.get('SessionTime', 0),
-                        lap=telemetry_data.get('Lap', 0),
-                        lap_time=telemetry_data.get('LapCurrentLapTime', 0),
-                        lap_distance=telemetry_data.get('LapDist', 0),
-                        speed=telemetry_data.get('Speed', 0),
-                        rpm=telemetry_data.get('RPM', 0),
-                        gear=telemetry_data.get('Gear', 0),
-                        throttle=telemetry_data.get('Throttle', 0),
-                        brake=telemetry_data.get('Brake', 0),
-                        steering=telemetry_data.get('SteeringWheelAngle', 0),
-                        track_temp=telemetry_data.get('TrackTemp', 0),
-                        air_temp=telemetry_data.get('AirTemp', 0),
-                        fuel_level=telemetry_data.get('FuelLevel', 0),
+                        session_time=telemetry_data.get("SessionTime", 0),
+                        lap=telemetry_data.get("Lap", 0),
+                        lap_time=telemetry_data.get("LapCurrentLapTime", 0),
+                        lap_distance=telemetry_data.get("LapDist", 0),
+                        speed=telemetry_data.get("Speed", 0),
+                        rpm=telemetry_data.get("RPM", 0),
+                        gear=telemetry_data.get("Gear", 0),
+                        throttle=telemetry_data.get("Throttle", 0),
+                        brake=telemetry_data.get("Brake", 0),
+                        steering=telemetry_data.get("SteeringWheelAngle", 0),
+                        track_temp=telemetry_data.get("TrackTemp", 0),
+                        air_temp=telemetry_data.get("AirTemp", 0),
+                        fuel_level=telemetry_data.get("FuelLevel", 0),
                         tire_temps={
-                            'LF': telemetry_data.get('LFtempCL', 0),
-                            'RF': telemetry_data.get('RFtempCL', 0),
-                            'LR': telemetry_data.get('LRtempCL', 0),
-                            'RR': telemetry_data.get('RRtempCL', 0)
+                            "LF": telemetry_data.get("LFtempCL", 0),
+                            "RF": telemetry_data.get("RFtempCL", 0),
+                            "LR": telemetry_data.get("LRtempCL", 0),
+                            "RR": telemetry_data.get("RRtempCL", 0),
                         },
-                        is_on_track=telemetry_data.get('IsOnTrack', False),
-                        session_state=str(telemetry_data.get('SessionState', 'Unknown')),
-                        flag_state=str(telemetry_data.get('SessionFlags', 'Green'))
+                        is_on_track=telemetry_data.get("IsOnTrack", False),
+                        session_state=str(telemetry_data.get("SessionState", "Unknown")),
+                        flag_state=str(telemetry_data.get("SessionFlags", "Green")),
                     )
                     self.last_telemetry = snapshot
                     return asdict(snapshot)
             except Exception as e:
                 logger.error(f"Error getting telemetry: {e}")
-        
+
         # Return simulated data if not connected or error
         simulated_data = TelemetrySnapshot(
             timestamp=time.time(),
@@ -444,13 +455,13 @@ Use standard spotter terminology and be concise - the driver needs quick, action
             track_temp=85.2,
             air_temp=72.1,
             fuel_level=15.5,
-            tire_temps={'LF': 180.2, 'RF': 182.1, 'LR': 175.3, 'RR': 177.8},
+            tire_temps={"LF": 180.2, "RF": 182.1, "LR": 175.3, "RR": 177.8},
             is_on_track=True,
             session_state="Racing",
-            flag_state="Green"
+            flag_state="Green",
         )
         return asdict(simulated_data)
-    
+
     async def spot_cars(self, radius: float = 100) -> Dict[str, Any]:
         """Get information about nearby cars"""
         # This would integrate with iRacing's car position data
@@ -461,44 +472,46 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                 "distance": 45.2,
                 "speed": 125.3,
                 "position": 3,
-                "relative_time": 1.2
+                "relative_time": 1.2,
             },
             {
-                "driver_name": "Jane Smith", 
+                "driver_name": "Jane Smith",
                 "distance": 89.1,
                 "speed": 118.7,
                 "position": 2,
-                "relative_time": 2.8
-            }
+                "relative_time": 2.8,
+            },
         ]
-        
+
         cars_behind = [
             {
                 "driver_name": "Bob Wilson",
                 "distance": -32.1,
                 "speed": 119.8,
                 "position": 5,
-                "relative_time": -0.9
+                "relative_time": -0.9,
             }
         ]
-        
+
         return {
             "cars_ahead": cars_ahead,
             "cars_behind": cars_behind,
             "cars_alongside": [],
             "total_cars_nearby": len(cars_ahead) + len(cars_behind),
             "search_radius": radius,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
-    
-    async def get_racing_advice(self, context: str = "", focus_area: str = "general") -> Dict[str, Any]:
+
+    async def get_racing_advice(
+        self, context: str = "", focus_area: str = "general"
+    ) -> Dict[str, Any]:
         """Generate racing advice based on current situation"""
         if not self.last_telemetry:
             await self.get_telemetry()
-        
+
         # Analyze current situation
         advice = self._generate_advice_from_telemetry(context, focus_area)
-        
+
         return {
             "advice": advice.advice,
             "situation": advice.situation,
@@ -507,9 +520,9 @@ Use standard spotter terminology and be concise - the driver needs quick, action
             "telemetry_basis": advice.telemetry_basis,
             "context": context,
             "focus_area": focus_area,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
-    
+
     def _generate_advice_from_telemetry(self, context: str, focus_area: str) -> RacingAdvice:
         """Generate racing advice based on telemetry analysis"""
         if not self.last_telemetry:
@@ -518,45 +531,45 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                 advice="Connect to iRacing to get real-time racing advice",
                 priority="low",
                 category="general",
-                telemetry_basis={}
+                telemetry_basis={},
             )
-        
+
         tel = self.last_telemetry
         situation_factors = []
         advice_points = []
         priority = "low"
-        
+
         # Analyze speed and performance
         if tel.speed < 50:
             situation_factors.append("low speed")
             advice_points.append("Consider increasing pace if safe to do so")
-        
+
         # Analyze throttle and brake inputs
         if tel.throttle > 0.95:
             situation_factors.append("full throttle")
         if tel.brake > 0.8:
             situation_factors.append("heavy braking")
             priority = "medium"
-        
+
         # Analyze car control
         if abs(tel.steering) > 0.5:
             situation_factors.append("significant steering input")
             if tel.speed > 100:
                 advice_points.append("Be smooth with steering inputs at high speed")
                 priority = "high"
-        
+
         # Generate contextual advice
         if focus_area == "safety":
             if tel.flag_state != "Green":
                 advice_points.insert(0, f"Caution: {tel.flag_state} flag condition")
                 priority = "critical"
-        
+
         situation = f"Lap {tel.lap}, {', '.join(situation_factors) if situation_factors else 'normal driving'}"
         advice = "; ".join(advice_points) if advice_points else "Continue current driving approach"
-        
+
         if context:
             advice = f"Given your question about {context}: {advice}"
-        
+
         return RacingAdvice(
             situation=situation,
             advice=advice,
@@ -568,10 +581,10 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                 "brake": tel.brake,
                 "steering": tel.steering,
                 "gear": tel.gear,
-                "lap": tel.lap
-            }
+                "lap": tel.lap,
+            },
         )
-    
+
     async def analyze_lap(self, lap_number: Optional[int] = None) -> Dict[str, Any]:
         """Analyze lap performance"""
         # This would analyze historical lap data
@@ -579,20 +592,19 @@ Use standard spotter terminology and be concise - the driver needs quick, action
         return {
             "lap_analyzed": lap_number or "current",
             "lap_time": "1:23.456",
-            "sectors": {
-                "sector_1": "28.123",
-                "sector_2": "31.456", 
-                "sector_3": "23.877"
-            },
+            "sectors": {"sector_1": "28.123", "sector_2": "31.456", "sector_3": "23.877"},
             "analysis": {
                 "strengths": ["Good sector 1 time", "Consistent braking points"],
-                "improvement_areas": ["Can carry more speed through turn 3", "Earlier throttle application in sector 2"],
+                "improvement_areas": [
+                    "Can carry more speed through turn 3",
+                    "Earlier throttle application in sector 2",
+                ],
                 "overall_rating": "B+",
-                "compared_to_personal_best": "+0.234 seconds"
+                "compared_to_personal_best": "+0.234 seconds",
             },
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
-    
+
     async def track_session(self) -> Dict[str, Any]:
         """Get session information"""
         return {
@@ -607,11 +619,11 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                 "air_temp": 72.1,
                 "track_temp": 85.2,
                 "wind_speed": 5.2,
-                "conditions": "Clear"
+                "conditions": "Clear",
             },
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
-    
+
     async def get_track_info(self) -> Dict[str, Any]:
         """Get track layout information"""
         return {
@@ -623,43 +635,60 @@ Use standard spotter terminology and be concise - the driver needs quick, action
             "surface": "Asphalt",
             "characteristics": [
                 "High-speed track",
-                "Elevation changes", 
+                "Elevation changes",
                 "Challenging turn 1",
-                "Long back straight"
+                "Long back straight",
             ],
             "notable_corners": {
                 "Turn 1": "Uphill right-hander, heavy braking zone",
                 "Turn 5": "Blind crest, commitment required",
-                "Turn 10a": "Chicane, good overtaking opportunity"
-            }
+                "Turn 10a": "Chicane, good overtaking opportunity",
+            },
         }
-    
+
+    async def telemetry_stream(self) -> None:
+        """Continuously fetch telemetry and feed the event handler."""
+        self.telemetry_stream_active = True
+        while self.telemetry_stream_active:
+            telemetry = await self.get_telemetry()
+            await self.event_handler.on_telemetry(telemetry)
+            await asyncio.sleep(TELEMETRY_INTERVAL)
+
     async def run(self):
         """Run the MCP server"""
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="race-mcp-server",
-                    server_version="0.1.0",
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
+            telemetry_task = asyncio.create_task(self.telemetry_stream())
+            await self.event_handler.start()
+            try:
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    InitializationOptions(
+                        server_name="race-mcp-server",
+                        server_version="0.1.0",
+                        capabilities=self.server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
                     ),
-                ),
-            )
+                )
+            finally:
+                self.telemetry_stream_active = False
+                telemetry_task.cancel()
+                with contextlib.suppress(Exception):
+                    await telemetry_task
+                await self.event_handler.stop()
 
 
 async def main():
     """Main entry point"""
     logger.info("Starting Race MCP Server...")
-    
+
     if PYIRSDK_AVAILABLE:
         logger.info("pyirsdk available - will connect to iRacing when possible")
     else:
         logger.warning("pyirsdk not available - running in simulation mode")
-    
+
     server = RaceMCPServer()
     await server.run()
 
