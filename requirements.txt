@@ -1,0 +1,19 @@
+# Core dependencies
+mcp>=1.0.0
+pyirsdk>=1.0.0
+asyncio-mqtt>=0.16.0
+pydantic>=2.0.0
+aiofiles>=24.0.0
+anyio>=4.0.0
+openai>=1.0.0
+
+# Optional voice interface dependencies
+sounddevice>=0.4.6
+numpy
+
+# Development dependencies (optional)
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+black>=24.0.0
+isort>=5.0.0
+mypy>=1.8.0
