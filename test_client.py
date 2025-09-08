@@ -8,10 +8,13 @@ This script demonstrates how to connect to and interact with the Race MCP Server
 import asyncio
 import json
 import sys
+
+import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
+@pytest.mark.asyncio
 async def test_race_mcp_server():
     """Test the Race MCP Server functionality"""
     print("🏁 Testing Race MCP Server...")

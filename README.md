@@ -85,6 +85,30 @@ python test_client.py
 ./start_server.sh --test
 ```
 
+### 🎙 Voice Interaction
+
+Real-time voice communication is supported through optional audio utilities.
+
+#### Prerequisites
+- OpenAI API key set in ``OPENAI_API_KEY``
+- Install voice dependencies: ``pip install race-mcp-server[voice]``
+
+#### Example Usage
+```python
+import asyncio
+from race_mcp_server.openai_client import OpenAIClient
+from race_mcp_server.voice_interface import VoiceInterface
+
+async def main():
+    client = OpenAIClient()
+    voice = VoiceInterface(client)
+    await voice.chat_once()
+
+asyncio.run(main())
+```
+This records a short microphone clip, sends it to OpenAI for transcription and
+speaks the model's response back to the user.
+
 ## 🛠 Available Tools
 
 ### 1. `get_telemetry`
