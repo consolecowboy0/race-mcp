@@ -76,6 +76,15 @@ python -m race_mcp_server
 ./start_server.sh --simulation
 ```
 
+### Launching with a GUI
+After installation, you can start the server using a small GUI:
+
+```bash
+race-mcp-gui
+```
+
+The GUI offers start/stop controls and displays server logs for quick race prep.
+
 ### Testing the Server
 ```bash
 # Run comprehensive tests
