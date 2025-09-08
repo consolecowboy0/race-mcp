@@ -6,6 +6,7 @@ pydantic>=2.0.0
 aiofiles>=24.0.0
 anyio>=4.0.0
 openai>=1.0.0
+python-dotenv>=1.0.0
 
 # Optional voice interface dependencies
 sounddevice>=0.4.6

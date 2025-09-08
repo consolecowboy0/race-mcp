@@ -15,6 +15,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not available, use system environment variables
+
 import mcp.server.stdio
 import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
@@ -42,6 +49,9 @@ logger = logging.getLogger(__name__)
 TELEMETRY_INTERVAL = float(os.getenv("IRACING_TELEMETRY_INTERVAL", "1.0"))
 LOG_LEVEL = os.getenv("RACE_MCP_LOG_LEVEL", "INFO")
 ENABLE_SPOTTING = os.getenv("RACE_MCP_ENABLE_SPOTTING", "true").lower() == "true"
+MOCK_TELEMETRY_HOST = os.getenv("MOCK_TELEMETRY_HOST", "127.0.0.1")
+MOCK_TELEMETRY_PORT = int(os.getenv("MOCK_TELEMETRY_PORT", "9000"))
+USE_MOCK_TELEMETRY = os.getenv("USE_MOCK_TELEMETRY", "false").lower() == "true"
 
 logger.setLevel(getattr(logging, LOG_LEVEL.upper()))
 
@@ -106,6 +116,9 @@ class RaceMCPServer:
         self.telemetry_stream_active = False
         self.openai_client = OpenAIClient()
         self.event_handler = MCPEventHandler(self.openai_client)
+        self.mock_telemetry_reader: Optional[asyncio.StreamReader] = None
+        self.mock_telemetry_writer: Optional[asyncio.StreamWriter] = None
+        self.mock_telemetry_task: Optional[asyncio.Task] = None
         self.setup_handlers()
 
     def setup_handlers(self):
@@ -402,8 +415,91 @@ Use standard spotter terminology and be concise - the driver needs quick, action
             else:
                 raise ValueError(f"Unknown prompt: {name}")
 
+    async def connect_to_mock_telemetry(self) -> bool:
+        """Connect to mock telemetry stream server"""
+        try:
+            self.mock_telemetry_reader, self.mock_telemetry_writer = await asyncio.open_connection(
+                MOCK_TELEMETRY_HOST, MOCK_TELEMETRY_PORT
+            )
+            logger.info(f"Connected to mock telemetry stream at {MOCK_TELEMETRY_HOST}:{MOCK_TELEMETRY_PORT}")
+            
+            # Start background task to read telemetry data
+            self.mock_telemetry_task = asyncio.create_task(self._read_mock_telemetry())
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to mock telemetry stream: {e}")
+            return False
+
+    async def _read_mock_telemetry(self) -> None:
+        """Background task to continuously read mock telemetry data"""
+        if not self.mock_telemetry_reader:
+            return
+            
+        try:
+            while True:
+                line = await self.mock_telemetry_reader.readline()
+                if not line:
+                    break
+                    
+                try:
+                    data = json.loads(line.decode().strip())
+                    # Convert mock data to TelemetrySnapshot format
+                    snapshot = TelemetrySnapshot(
+                        timestamp=time.time(),
+                        session_time=data.get("SessionTime", 0),
+                        lap=data.get("Lap", 0),
+                        lap_time=data.get("LapCurrentLapTime", 0),
+                        lap_distance=data.get("LapDist", 0),
+                        speed=data.get("Speed", 0),
+                        rpm=data.get("RPM", 0),
+                        gear=data.get("Gear", 0),
+                        throttle=data.get("Throttle", 0),
+                        brake=data.get("Brake", 0),
+                        steering=data.get("SteeringWheelAngle", 0),
+                        track_temp=data.get("TrackTemp", 0),
+                        air_temp=data.get("AirTemp", 0),
+                        fuel_level=data.get("FuelLevel", 0),
+                        tire_temps={"LF": 0, "RF": 0, "LR": 0, "RR": 0},  # Mock data doesn't include tire temps
+                        is_on_track=data.get("IsOnTrack", False),
+                        session_state=data.get("SessionState", "Unknown"),
+                        flag_state=data.get("SessionFlags", "Green"),
+                    )
+                    self.last_telemetry = snapshot
+                    logger.debug(f"Updated telemetry: Lap {snapshot.lap}, Speed {snapshot.speed:.1f}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse telemetry JSON: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing telemetry data: {e}")
+                    
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Error reading mock telemetry: {e}")
+
+    async def disconnect_mock_telemetry(self) -> None:
+        """Disconnect from mock telemetry stream"""
+        if self.mock_telemetry_task:
+            self.mock_telemetry_task.cancel()
+            try:
+                await self.mock_telemetry_task
+            except asyncio.CancelledError:
+                pass
+            self.mock_telemetry_task = None
+            
+        if self.mock_telemetry_writer:
+            self.mock_telemetry_writer.close()
+            await self.mock_telemetry_writer.wait_closed()
+            self.mock_telemetry_writer = None
+            self.mock_telemetry_reader = None
+            logger.info("Disconnected from mock telemetry stream")
+
     async def get_telemetry(self) -> Dict[str, Any]:
         """Get current telemetry data"""
+        # Priority 1: Use mock telemetry if connected and data is available
+        if USE_MOCK_TELEMETRY and self.last_telemetry and self.mock_telemetry_task and not self.mock_telemetry_task.done():
+            return asdict(self.last_telemetry)
+        
+        # Priority 2: Use real iRacing data if available
         if PYIRSDK_AVAILABLE and pyirsdk.is_connected:
             try:
                 # Get telemetry from iRacing
@@ -656,6 +752,11 @@ Use standard spotter terminology and be concise - the driver needs quick, action
 
     async def run(self):
         """Run the MCP server"""
+        # Connect to mock telemetry if enabled
+        if USE_MOCK_TELEMETRY:
+            logger.info("Mock telemetry mode enabled, attempting to connect...")
+            await self.connect_to_mock_telemetry()
+        
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
             telemetry_task = asyncio.create_task(self.telemetry_stream())
             await self.event_handler.start()
@@ -678,13 +779,18 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                 with contextlib.suppress(Exception):
                     await telemetry_task
                 await self.event_handler.stop()
+                # Disconnect from mock telemetry if connected
+                if USE_MOCK_TELEMETRY:
+                    await self.disconnect_mock_telemetry()
 
 
 async def main():
     """Main entry point"""
     logger.info("Starting Race MCP Server...")
 
-    if PYIRSDK_AVAILABLE:
+    if USE_MOCK_TELEMETRY:
+        logger.info(f"Mock telemetry mode enabled - will connect to {MOCK_TELEMETRY_HOST}:{MOCK_TELEMETRY_PORT}")
+    elif PYIRSDK_AVAILABLE:
         logger.info("pyirsdk available - will connect to iRacing when possible")
     else:
         logger.warning("pyirsdk not available - running in simulation mode")

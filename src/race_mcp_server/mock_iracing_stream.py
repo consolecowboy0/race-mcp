@@ -92,6 +92,24 @@ class MockIRacingDataGenerator:
         self.session_time = now - self.start_time
         self._update_state(dt)
 
+        # Simulate occasional flag changes and off-track events for AI testing
+        elapsed = self.session_time
+        
+        # Simulate flag changes every 30-60 seconds
+        flag_cycle = elapsed % 60
+        if flag_cycle < 5:
+            session_flags = "Yellow"  # Caution
+        elif flag_cycle < 8:
+            session_flags = "Red"     # Red flag
+        elif flag_cycle < 55:
+            session_flags = "Green"   # Normal racing
+        else:
+            session_flags = "Checkered"  # End of session
+            
+        # Simulate going off track occasionally (every 45 seconds for 3 seconds)
+        off_track_cycle = elapsed % 45
+        is_on_track = not (42 <= off_track_cycle <= 45)
+
         lap_time = now - self.lap_start_time
         telemetry = MockTelemetry(
             SessionTime=self.session_time,
@@ -107,9 +125,9 @@ class MockIRacingDataGenerator:
             TrackTemp=self.track_temp,
             AirTemp=self.air_temp,
             FuelLevel=self.fuel_level,
-            IsOnTrack=True,
+            IsOnTrack=is_on_track,
             SessionState="Racing",
-            SessionFlags="Green",
+            SessionFlags=session_flags,
         )
         return asdict(telemetry)
 
