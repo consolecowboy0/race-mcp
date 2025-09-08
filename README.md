@@ -76,6 +76,16 @@ python -m race_mcp_server
 ./start_server.sh --simulation
 ```
 
+### Mock iRacing Data Generator
+For development without the simulator, a standalone process can emit realistic iRacing-style telemetry over TCP.
+
+```bash
+# Start the mock telemetry stream on port 9000
+python -m race_mcp_server.mock_iracing_stream --port 9000
+```
+
+Clients can connect to the specified host and port to receive newline-delimited JSON telemetry frames that mimic the structure of a real iRacing stream.
+
 ### Launching with a GUI
 After installation, you can start the server using a small GUI:
 
