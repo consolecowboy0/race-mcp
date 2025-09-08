@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiofiles>=24.0.0",
     "anyio>=4.0.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -29,9 +30,13 @@ dev = [
     "isort>=5.0.0",
     "mypy>=1.8.0",
 ]
+voice = [
+    "sounddevice>=0.4.6",
+]
 
 [project.scripts]
 race-mcp-server = "race_mcp_server.main:main"
+race-mcp-gui = "race_mcp_server.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

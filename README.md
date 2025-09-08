@@ -86,6 +86,15 @@ python -m race_mcp_server.mock_iracing_stream --port 9000
 
 Clients can connect to the specified host and port to receive newline-delimited JSON telemetry frames that mimic the structure of a real iRacing stream.
 
+### Launching with a GUI
+After installation, you can start the server using a small GUI:
+
+```bash
+race-mcp-gui
+```
+
+The GUI offers start/stop controls and displays server logs for quick race prep.
+
 ### Testing the Server
 ```bash
 # Run comprehensive tests
@@ -94,6 +103,30 @@ python test_client.py
 # Or use the startup script with testing
 ./start_server.sh --test
 ```
+
+### 🎙 Voice Interaction
+
+Real-time voice communication is supported through optional audio utilities.
+
+#### Prerequisites
+- OpenAI API key set in ``OPENAI_API_KEY``
+- Install voice dependencies: ``pip install race-mcp-server[voice]``
+
+#### Example Usage
+```python
+import asyncio
+from race_mcp_server.openai_client import OpenAIClient
+from race_mcp_server.voice_interface import VoiceInterface
+
+async def main():
+    client = OpenAIClient()
+    voice = VoiceInterface(client)
+    await voice.chat_once()
+
+asyncio.run(main())
+```
+This records a short microphone clip, sends it to OpenAI for transcription and
+speaks the model's response back to the user.
 
 ## 🛠 Available Tools
 
