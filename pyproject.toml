@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiofiles>=24.0.0",
     "anyio>=4.0.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,9 @@ dev = [
     "black>=24.0.0",
     "isort>=5.0.0",
     "mypy>=1.8.0",
+]
+voice = [
+    "sounddevice>=0.4.6",
 ]
 
 [project.scripts]
