@@ -279,8 +279,7 @@ race-mcp/
 │   ├── __main__.py              # CLI entry point  
 │   ├── main.py                  # Core MCP server (580+ lines)
 │   └── telemetry_processor.py   # Advanced analytics engine
-├── .vscode/
-│   └── mcp.json                 # Claude Desktop configuration
+├── start_server.sh              # Convenient startup script
 ├── pyproject.toml               # Project configuration
 ├── test_client.py               # Comprehensive test suite
 └── README.md                    # This file
@@ -291,6 +290,15 @@ race-mcp/
 2. **New Resources**: Extend the resource handlers
 3. **Enhanced Analytics**: Modify `telemetry_processor.py`
 4. **New Prompts**: Add prompt templates to the prompts section
+
+### Testing New Features
+```bash
+# Test after making changes
+python test_client.py
+
+# Test with debug output
+./start_server.sh --debug --test
+```
 
 ### Contributing
 1. Fork the repository
@@ -312,12 +320,11 @@ aiofiles = ">=0.8.0"     # Async file operations
 - **OS**: Windows, macOS, or Linux
 - **Python**: 3.8+ (tested with 3.10.12)
 - **Memory**: 100MB+ available
-- **iRacing**: Any recent version with telemetry enabled
+- **iRacing**: Any recent version with telemetry enabled (optional - server runs in simulation mode without it)
 
 ### Optional Dependencies
-- **Claude Desktop**: For GUI integration
-- **VS Code**: For development with provided configurations
 - **pytest**: For running extended test suites
+- **MCP Client**: Any MCP-compatible client for integration
 
 ## 📜 License
 
@@ -331,7 +338,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-**Ready to improve your lap times? Start the server and let the AI coaching begin! 🏎️💨**
+**Ready to improve your lap times? Start the server and run the test client to see it in action! 🏎️💨**
 
 ## Configuration
 
