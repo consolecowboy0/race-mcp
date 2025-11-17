@@ -7,7 +7,9 @@ This script demonstrates how to connect to and interact with the Race MCP Server
 
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 
 import pytest
 from mcp.client.session import ClientSession
@@ -20,9 +22,18 @@ async def test_race_mcp_server():
     print("🏁 Testing Race MCP Server...")
     
     # Connect to the server
+    repo_root = Path(__file__).resolve().parent
+    env = os.environ.copy()
+    src_path = repo_root / "src"
+    existing_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{src_path}{os.pathsep}{existing_path}" if existing_path else str(src_path)
+    )
     server_params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "race_mcp_server"]
+        args=["-m", "race_mcp_server"],
+        cwd=str(repo_root),
+        env=env,
     )
     
     async with stdio_client(server_params) as (read, write):

@@ -27,6 +27,7 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
+from .callback_dispatcher import build_callback_dispatcher_from_env
 from .event_handler import MCPEventHandler
 from .openai_client import OpenAIClient
 
@@ -71,6 +72,7 @@ class TelemetrySnapshot:
     throttle: float
     brake: float
     steering: float
+    position: int
     track_temp: float
     air_temp: float
     fuel_level: float
@@ -115,7 +117,10 @@ class RaceMCPServer:
         self.session_cars: Dict[int, CarInfo] = {}
         self.telemetry_stream_active = False
         self.openai_client = OpenAIClient()
-        self.event_handler = MCPEventHandler(self.openai_client)
+        callback_dispatcher = build_callback_dispatcher_from_env()
+        self.event_handler = MCPEventHandler(
+            self.openai_client, callback_dispatcher=callback_dispatcher
+        )
         self.mock_telemetry_reader: Optional[asyncio.StreamReader] = None
         self.mock_telemetry_writer: Optional[asyncio.StreamWriter] = None
         self.mock_telemetry_task: Optional[asyncio.Task] = None
@@ -144,6 +149,10 @@ class RaceMCPServer:
                             "throttle": {"type": "number", "description": "0.0 to 1.0"},
                             "brake": {"type": "number", "description": "0.0 to 1.0"},
                             "steering": {"type": "number", "description": "-1.0 to 1.0"},
+                            "position": {
+                                "type": "integer",
+                                "description": "Overall race position",
+                            },
                             "fuel_level": {"type": "number"},
                             "is_on_track": {"type": "boolean"},
                             "session_state": {"type": "string"},
@@ -517,6 +526,13 @@ Use standard spotter terminology and be concise - the driver needs quick, action
                         throttle=telemetry_data.get("Throttle", 0),
                         brake=telemetry_data.get("Brake", 0),
                         steering=telemetry_data.get("SteeringWheelAngle", 0),
+                        position=int(
+                            telemetry_data.get(
+                                "PlayerCarPosition",
+                                telemetry_data.get("PlayerCarClassPosition", 0),
+                            )
+                            or 0
+                        ),
                         track_temp=telemetry_data.get("TrackTemp", 0),
                         air_temp=telemetry_data.get("AirTemp", 0),
                         fuel_level=telemetry_data.get("FuelLevel", 0),
@@ -548,6 +564,7 @@ Use standard spotter terminology and be concise - the driver needs quick, action
             throttle=0.8,
             brake=0.0,
             steering=0.15,
+            position=8,
             track_temp=85.2,
             air_temp=72.1,
             fuel_level=15.5,

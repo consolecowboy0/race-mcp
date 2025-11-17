@@ -128,6 +128,25 @@ asyncio.run(main())
 This records a short microphone clip, sends it to OpenAI for transcription and
 speaks the model's response back to the user.
 
+### 🔁 ElevenLabs Agent Callbacks
+
+You can forward race events and telemetry snapshots to an external ElevenLabs
+agent (or any HTTP endpoint) through the built-in callback dispatcher.
+
+1. Configure environment variables:
+   - `ENABLE_ELEVENLABS_CALLBACKS=true`
+   - `ELEVENLABS_API_KEY=<your_xi_api_key>`
+   - `ELEVENLABS_AGENT_ID=<agent_id>` or `ELEVENLABS_CALLBACK_URL=https://...`
+   - Optional tuning: `ELEVENLABS_BASE_URL`, `ELEVENLABS_CALLBACK_TIMEOUT`,
+     `ELEVENLABS_CALLBACK_QUEUE_SIZE`
+2. Start the MCP server as usual.
+
+The dispatcher runs as a separate async worker that regularly posts telemetry
+snapshots (`telemetry_snapshot` events) and situational updates such as
+`position_gain`, `position_loss`, and `lap_complete`. This makes it easy to run
+an ElevenLabs voice agent as an independent service that reacts to race updates
+with comments like “Hey, you just passed someone!”.
+
 ## 🛠 Available Tools
 
 ### 1. `get_telemetry`
