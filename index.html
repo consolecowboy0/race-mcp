@@ -1,10 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reinforcement Learning Battle Cars</title>
-  <style>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reinforcement Learning Battle Cars</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+    <style>
     :root {
       color-scheme: dark;
       --bg: #0b1021;
@@ -225,7 +226,7 @@
 <body>
   <header>
     <h1>Reinforcement Learning Battle Cars</h1>
-    <div class="pill">Two Q-learners learn to duel by ramming</div>
+    <div class="pill">Twin neural Q-nets learn to duel entirely in-browser</div>
   </header>
 
   <main>
@@ -252,14 +253,14 @@
         <h2>Commentary feed</h2>
         <ul id="event-log"></ul>
       </div>
-      <h2>How the duel works</h2>
-      <ul>
-        <li>Both cars learn online with a lightweight <strong>double Q-learning</strong> setup backed by a replay buffer and an annealed <strong>epsilon-greedy</strong> policy.</li>
-        <li>The state captures coarse distance, relative angle, and each car's speed so the agents can reason about closing speed and positioning.</li>
-        <li>Actions are accelerate, brake, coast, or steer left/right. Each move applies damage from impacts or wall slaps.</li>
-        <li>Rewards combine impact damage, survival bonus, penalties for idling, and <strong>dense shaping</strong> for moving toward the opponent.</li>
-        <li>Episodes end when one hull reaches 0%. The surviving car gets a win bonus and the Q-tables are updated from replayed transitions every step.</li>
-      </ul>
+        <h2>How the duel works</h2>
+        <ul>
+          <li>Both cars learn online with compact <strong>neural double Q-networks</strong> (TensorFlow.js) that use a soft-updated target model and an annealed <strong>epsilon-greedy</strong> policy.</li>
+          <li>The state captures normalized offsets, heading error trig features, speed, closing velocity, and wall proximity so the agents can reason about closing speed and positioning.</li>
+          <li>Actions are accelerate, brake, coast, or steer left/right. Each move applies damage from impacts or wall slaps.</li>
+          <li>Rewards combine impact damage, survival bonus, penalties for idling, and <strong>dense shaping</strong> for moving toward the opponent.</li>
+          <li>Episodes end when one hull reaches 0%. The surviving car gets a win bonus and the neural Q-nets are updated from replayed transitions every step.</li>
+        </ul>
     </section>
   </main>
 
@@ -285,6 +286,7 @@
     };
 
     const ACTIONS = ["accelerate", "brake", "left", "right", "coast", "look"];
+    const STATE_SIZE = 9;
 
     let hype = 0.1;
     function addLog(message) {
@@ -325,23 +327,82 @@
       return Math.max(min, Math.min(max, val));
     }
 
-    function bucket(value, size, max) {
-      return Math.min(size - 1, Math.floor((value / max) * size));
-    }
+    class NeuralQ {
+      constructor(actionSize, stateSize = STATE_SIZE) {
+        this.actionSize = actionSize;
+        this.stateSize = stateSize;
+        this.online = this.buildModel();
+        this.target = this.buildModel();
+        this.optimizer = tf.train.adam(0.0009);
+        this.updateTarget(1);
+      }
 
-    class QTable {
-      constructor() {
-        this.table = new Map();
+      buildModel() {
+        const input = tf.input({ shape: [this.stateSize] });
+        let x = tf.layers.dense({ units: 64, activation: "relu", kernelInitializer: "heNormal" }).apply(input);
+        x = tf.layers.layerNormalization().apply(x);
+        x = tf.layers.dense({ units: 64, activation: "relu", kernelInitializer: "heNormal" }).apply(x);
+        const output = tf.layers.dense({
+          units: this.actionSize,
+          activation: "linear",
+          kernelInitializer: "glorotUniform",
+        }).apply(x);
+        return tf.model({ inputs: input, outputs: output });
       }
-      _key(stateKey) {
-        return stateKey.join(":");
+
+      qValues(stateVec) {
+        return tf.tidy(() => {
+          const input = tf.tensor2d([stateVec], [1, this.stateSize]);
+          const out = this.online.predict(input);
+          const data = out.dataSync();
+          return Array.from(data);
+        });
       }
-      get(stateKey) {
-        const key = this._key(stateKey);
-        if (!this.table.has(key)) {
-          this.table.set(key, Array(ACTIONS.length).fill(0));
-        }
-        return this.table.get(key);
+
+      updateTarget(tau = 0.02) {
+        const onlineWeights = this.online.getWeights();
+        const targetWeights = this.target.getWeights();
+        const blended = onlineWeights.map((w, i) =>
+          tf.add(tf.mul(w, tau), tf.mul(targetWeights[i], 1 - tau))
+        );
+        this.target.setWeights(blended);
+        targetWeights.forEach((w) => w.dispose());
+      }
+
+      train(batch, gamma) {
+        if (!batch.length) return;
+        const states = batch.map((b) => b.state);
+        const nextStates = batch.map((b) => b.nextState);
+        const actions = batch.map((b) => b.actionIdx);
+        const rewards = batch.map((b) => b.reward);
+        const dones = batch.map((b) => b.done ? 1 : 0);
+
+        const statesTensor = tf.tensor2d(states, [states.length, this.stateSize]);
+        const nextStatesTensor = tf.tensor2d(nextStates, [nextStates.length, this.stateSize]);
+        const actionMask = tf.oneHot(actions, this.actionSize);
+        const rewardsTensor = tf.tensor1d(rewards);
+        const donesTensor = tf.tensor1d(dones);
+
+        this.optimizer.minimize(() => {
+          const nextOnline = this.online.predict(nextStatesTensor);
+          const nextTarget = this.target.predict(nextStatesTensor);
+          const nextAction = tf.argMax(nextOnline, 1);
+          const nextActionMask = tf.oneHot(nextAction, this.actionSize);
+          const nextQ = tf.sum(tf.mul(nextTarget, nextActionMask), 1);
+          const targetQ = rewardsTensor.add(nextQ.mul(tf.sub(1, donesTensor)).mul(gamma));
+
+          const currentQAll = this.online.predict(statesTensor);
+          const pickedQ = tf.sum(tf.mul(currentQAll, actionMask), 1);
+          const loss = tf.losses.huberLoss(targetQ, pickedQ).mean();
+          return loss;
+        });
+
+        this.updateTarget();
+        statesTensor.dispose();
+        nextStatesTensor.dispose();
+        actionMask.dispose();
+        rewardsTensor.dispose();
+        donesTensor.dispose();
       }
     }
 
@@ -381,8 +442,7 @@
         this.wins = 0;
         this.episodes = 0;
         this.color = options.color;
-        this.q1 = new QTable();
-        this.q2 = new QTable();
+        this.brain = new NeuralQ(ACTIONS.length);
         this.buffer = new ReplayBuffer();
         this.lockTimer = 0;
       }
@@ -396,20 +456,12 @@
         this.lockTimer = 0;
       }
 
-      state(opponent) {
+      stateVector(opponent) {
         const dx = opponent.x - this.x;
         const dy = opponent.y - this.y;
         const dist = Math.hypot(dx, dy);
         const relAngle = Math.atan2(dy, dx);
         const angleDiff = ((relAngle - this.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-
-        const distBin = bucket(dist, 6, Math.hypot(WORLD.w, WORLD.h));
-        const angBin = bucket(angleDiff + Math.PI, 8, Math.PI * 2);
-        const speedBin = bucket(Math.abs(this.v), 5, 9);
-        const oppSpeedBin = bucket(Math.abs(opponent.v), 5, 9);
-
-        const closing = closingVelocity(this, opponent);
-        const closingBin = bucket(closing + 12, 6, 24);
 
         const wallProximity = Math.min(
           this.x - WORLD.margin,
@@ -417,19 +469,22 @@
           this.y - WORLD.margin,
           WORLD.h - WORLD.margin - this.y
         );
-        const wallBin = bucket(wallProximity, 4, WORLD.margin + 10);
 
-        return [distBin, angBin, speedBin, oppSpeedBin, closingBin, wallBin];
+        return [
+          dx / WORLD.w,
+          dy / WORLD.h,
+          Math.cos(angleDiff),
+          Math.sin(angleDiff),
+          dist / Math.hypot(WORLD.w, WORLD.h),
+          this.v / 9,
+          opponent.v / 9,
+          closingVelocity(this, opponent) / 12,
+          wallProximity / (WORLD.margin + 10),
+        ];
       }
 
-      qValues(stateKey) {
-        const qA = this.q1.get(stateKey);
-        const qB = this.q2.get(stateKey);
-        return qA.map((v, i) => v + qB[i]);
-      }
-
-      chooseAction(stateKey, epsilon) {
-        const qs = this.qValues(stateKey);
+      chooseAction(stateVec, epsilon) {
+        const qs = this.brain.qValues(stateVec);
         let actionIdx;
         if (Math.random() < epsilon) {
           actionIdx = Math.floor(Math.random() * ACTIONS.length);
@@ -472,27 +527,14 @@
         }
       }
 
-      remember(stateKey, actionIdx, reward, nextStateKey, done) {
-        this.buffer.push({ stateKey, actionIdx, reward, nextStateKey, done });
+      remember(state, actionIdx, reward, nextState, done) {
+        this.buffer.push({ state, actionIdx, reward, nextState, done });
       }
 
-      learn(batchSize, gamma, alpha) {
+      learn(batchSize, gamma) {
         if (this.buffer.size === 0) return;
         const samples = this.buffer.sample(Math.min(batchSize, this.buffer.size));
-        samples.forEach(({ stateKey, actionIdx, reward, nextStateKey, done }) => {
-          const updateQ1 = Math.random() < 0.5;
-          const currentQ = updateQ1 ? this.q1 : this.q2;
-          const targetQ = updateQ1 ? this.q2 : this.q1;
-
-          const nextForSelection = updateQ1 ? this.q1.get(nextStateKey) : this.q2.get(nextStateKey);
-          const bestNextIdx = nextForSelection.indexOf(Math.max(...nextForSelection));
-          const nextForEval = targetQ.get(nextStateKey);
-          const bootstrap = done ? 0 : gamma * nextForEval[bestNextIdx];
-
-          const qValues = currentQ.get(stateKey);
-          const target = reward + bootstrap;
-          qValues[actionIdx] += alpha * (target - qValues[actionIdx]);
-        });
+        this.brain.train(samples, gamma);
       }
     }
 
@@ -512,7 +554,6 @@
     let epsilon = 0.18;
     const epsilonFloor = 0.02;
     const decay = 0.9985;
-    const alpha = 0.26;
     const gamma = 0.965;
     const batchSize = 16;
     const updatesPerStep = 2;
@@ -630,8 +671,8 @@
       }
 
       const prevDist = Math.hypot(blue.x - red.x, blue.y - red.y);
-      const blueState = blue.state(red);
-      const redState = red.state(blue);
+      const blueState = blue.stateVector(red);
+      const redState = red.stateVector(blue);
 
       const explore = epsilonOverride ?? epsilon;
       const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, explore);
@@ -643,8 +684,8 @@
       red.move();
 
       const { damageBlue, damageRed, wallHitBlue, wallHitRed, impactEvent } = handleCollisions();
-      const nextBlue = blue.state(red);
-      const nextRed = red.state(blue);
+      const nextBlue = blue.stateVector(red);
+      const nextRed = red.stateVector(blue);
       const nextDist = Math.hypot(blue.x - red.x, blue.y - red.y);
       const headingBlue = headingError(blue, red);
       const headingRed = headingError(red, blue);
@@ -698,8 +739,8 @@
       blue.remember(blueState, blueIdx, rewardBlue, nextBlue, done);
       red.remember(redState, redIdx, rewardRed, nextRed, done);
       for (let i = 0; i < updatesPerStep; i++) {
-        blue.learn(batchSize, gamma, alpha);
-        red.learn(batchSize, gamma, alpha);
+        blue.learn(batchSize, gamma);
+        red.learn(batchSize, gamma);
       }
 
       if (done) {
@@ -865,9 +906,9 @@
 
     document.getElementById("boost").addEventListener("click", () => {
       pulses.push({ x: red.x, y: red.y, r: 12, a: 0.6 });
-      const state = red.state(blue);
+      const state = red.stateVector(blue);
       red.remember(state, 0, 5, state, false);
-      red.learn(1, gamma, alpha);
+      red.learn(1, gamma);
     });
 
     // Add slight camera pulse on strong impacts
