@@ -284,7 +284,7 @@
       collisionRadius: 18,
     };
 
-    const ACTIONS = ["accelerate", "brake", "left", "right", "coast"];
+    const ACTIONS = ["accelerate", "brake", "left", "right", "coast", "look"];
 
     let hype = 0.1;
     function addLog(message) {
@@ -313,6 +313,12 @@
       // negative dot means closing; flip sign so positive = closing speed
       const relV = -(dx * (selfVx - oppVx) + dy * (selfVy - oppVy)) / dist;
       return clamp(relV, -12, 12);
+    }
+
+    function headingError(self, opponent) {
+      const desired = Math.atan2(opponent.y - self.y, opponent.x - self.x);
+      const diff = ((desired - self.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      return Math.abs(diff);
     }
 
     function clamp(val, min, max) {
@@ -378,6 +384,7 @@
         this.q1 = new QTable();
         this.q2 = new QTable();
         this.buffer = new ReplayBuffer();
+        this.lockTimer = 0;
       }
 
       reset(x, y, angle) {
@@ -386,6 +393,7 @@
         this.angle = angle;
         this.v = 0;
         this.health = 100;
+        this.lockTimer = 0;
       }
 
       state(opponent) {
@@ -420,12 +428,6 @@
         return qA.map((v, i) => v + qB[i]);
       }
 
-      qValues(stateKey) {
-        const qA = this.q1.get(stateKey);
-        const qB = this.q2.get(stateKey);
-        return qA.map((v, i) => v + qB[i]);
-      }
-
       chooseAction(stateKey, epsilon) {
         const qs = this.qValues(stateKey);
         let actionIdx;
@@ -440,13 +442,23 @@
         return { action: ACTIONS[actionIdx], actionIdx };
       }
 
-      applyAction(action) {
-        const accel = 0.55;
+      lookAt(opponent) {
+        const desired = Math.atan2(opponent.y - this.y, opponent.x - this.x);
+        const diff = ((desired - this.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        const maxTurn = 0.18;
+        this.angle += clamp(diff, -maxTurn, maxTurn);
+        const aligned = Math.abs(diff) < 0.12;
+        this.lockTimer = aligned ? 60 : Math.max(this.lockTimer, 30);
+      }
+
+      applyAction(action, opponent) {
+        const accel = 0.55 * (1 + (this.lockTimer > 0 ? 0.2 : 0));
         const turn = 0.09;
         if (action === "accelerate") this.v += accel;
         if (action === "brake") this.v -= accel * 1.2;
         if (action === "left") this.angle -= turn;
         if (action === "right") this.angle += turn;
+        if (action === "look") this.lookAt(opponent);
         this.v = clamp(this.v, -6, 9);
       }
 
@@ -454,6 +466,10 @@
         this.x += Math.cos(this.angle) * this.v;
         this.y += Math.sin(this.angle) * this.v;
         this.v *= WORLD.friction;
+        if (this.lockTimer > 0) {
+          this.v += 0.04;
+          this.lockTimer -= 1;
+        }
       }
 
       remember(stateKey, actionIdx, reward, nextStateKey, done) {
@@ -630,6 +646,8 @@
       const nextBlue = blue.state(red);
       const nextRed = red.state(blue);
       const nextDist = Math.hypot(blue.x - red.x, blue.y - red.y);
+      const headingBlue = headingError(blue, red);
+      const headingRed = headingError(red, blue);
 
       let { rewardBlue, rewardRed } = computeReward({
         damageBlue,
