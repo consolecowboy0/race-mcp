@@ -636,8 +636,8 @@
       const explore = epsilonOverride ?? epsilon;
       const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, explore);
       const { action: redAction, actionIdx: redIdx } = red.chooseAction(redState, explore);
-      blue.applyAction(blueAction);
-      red.applyAction(redAction);
+      blue.applyAction(blueAction, red);
+      red.applyAction(redAction, blue);
 
       blue.move();
       red.move();
