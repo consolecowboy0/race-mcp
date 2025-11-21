@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reinforcement Learning Battle Cars</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1021;
+      --panel: #151b33;
+      --accent: #67e8f9;
+      --accent-2: #fda4af;
+      --grid: #1f2a48;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+      background: radial-gradient(circle at 20% 20%, #162042, var(--bg));
+      color: #e8edf7;
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      min-height: 100vh;
+    }
+
+    header {
+      grid-column: 1 / span 2;
+      padding: 1.5rem 2rem 0.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      letter-spacing: 0.02em;
+    }
+
+    .pill {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 0.35rem 0.75rem;
+      border-radius: 999px;
+      font-size: 0.9rem;
+      color: #c7d2fe;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-column: 1 / span 2;
+      gap: 1.2rem;
+      padding: 0 2rem 2rem;
+    }
+
+    canvas {
+      width: 100%;
+      height: 620px;
+      background: radial-gradient(circle at 50% 50%, #0f162c, #0a0f1f 60%);
+      border-radius: 14px;
+      border: 1px solid #1f2a48;
+      box-shadow: 0 10px 50px rgba(0, 0, 0, 0.45);
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 14px;
+      padding: 1rem 1.25rem;
+      border: 1px solid #1f2a48;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    }
+
+    .panel h2 {
+      margin-top: 0;
+      font-size: 1.2rem;
+      color: #c4d6ff;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+
+    .stat-card {
+      background: rgba(255, 255, 255, 0.04);
+      padding: 0.75rem 0.9rem;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .stat-card strong {
+      display: block;
+      color: #94a3b8;
+      font-size: 0.85rem;
+      margin-bottom: 0.3rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .stat-card span {
+      font-size: 1.2rem;
+      color: #e5e7eb;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 0.5rem 0.9rem;
+      background: #1f2a48;
+      border: 1px solid #2f3a62;
+      color: #e2e8f0;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: transform 0.08s ease, background 0.2s ease;
+    }
+
+    button:hover {
+      background: #2b3763;
+      transform: translateY(-1px);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    .legend {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.95rem;
+    }
+
+    .chip {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 1.1rem;
+      color: #cbd5e1;
+      line-height: 1.5;
+    }
+
+    footer {
+      grid-column: 1 / span 2;
+      padding: 0 2rem 1.5rem;
+      color: #9ca3af;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Reinforcement Learning Battle Cars</h1>
+    <div class="pill">Two Q-learners learn to duel by ramming</div>
+  </header>
+
+  <main>
+    <canvas id="arena" width="900" height="700"></canvas>
+    <section class="panel">
+      <h2>Simulation Controls</h2>
+      <div class="controls">
+        <button id="toggle">Pause</button>
+        <button id="reset">Reset Episode</button>
+        <button id="boost">Give Red a small training boost</button>
+      </div>
+      <div class="legend">
+        <span class="legend-item"><span class="chip" style="background:#60a5fa"></span>Blue agent</span>
+        <span class="legend-item"><span class="chip" style="background:#f472b6"></span>Red agent</span>
+        <span class="legend-item"><span class="chip" style="background:#facc15"></span>Impulse damage</span>
+      </div>
+      <div class="stats" id="stats"></div>
+      <h2>How the duel works</h2>
+      <ul>
+        <li>Both cars learn online with Q-learning using an <strong>epsilon-greedy</strong> policy that slowly anneals.</li>
+        <li>The state is a coarse encoding of distance, angle to target, and current speed.</li>
+        <li>Actions are accelerate, brake, coast, or steer left/right. Each move applies damage from impacts or wall slaps.</li>
+        <li>Rewards: +damage to opponent, -self damage, a small survival bonus, and a penalty for stalling.</li>
+        <li>Episodes end when one hull reaches 0%. The surviving car gets a win and the Q-table is updated across steps.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    Watch the Q-values converge as cars learn to circle, flank, and ram each other around the square arena. Training happens entirely in the browser—no back end required.
+  </footer>
+
+  <script>
+    const canvas = document.getElementById("arena");
+    const ctx = canvas.getContext("2d");
+    const statsEl = document.getElementById("stats");
+
+    const WORLD = {
+      w: canvas.width,
+      h: canvas.height,
+      margin: 40,
+      wallDamage: 10,
+      friction: 0.97,
+      dt: 1 / 60,
+      collisionRadius: 18,
+    };
+
+    const ACTIONS = ["accelerate", "brake", "left", "right", "coast"];
+
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
+    }
+
+    function bucket(value, size, max) {
+      return Math.min(size - 1, Math.floor((value / max) * size));
+    }
+
+    class QTable {
+      constructor() {
+        this.table = new Map();
+      }
+      _key(stateKey) {
+        return stateKey.join(":");
+      }
+      get(stateKey) {
+        const key = this._key(stateKey);
+        if (!this.table.has(key)) {
+          this.table.set(key, Array(ACTIONS.length).fill(0));
+        }
+        return this.table.get(key);
+      }
+      update(stateKey, actionIdx, reward, nextStateKey, gamma, alpha) {
+        const q = this.get(stateKey);
+        const next = this.get(nextStateKey);
+        const target = reward + gamma * Math.max(...next);
+        q[actionIdx] += alpha * (target - q[actionIdx]);
+      }
+    }
+
+    class Car {
+      constructor(options) {
+        Object.assign(this, options);
+        this.v = 0;
+        this.health = 100;
+        this.wins = 0;
+        this.episodes = 0;
+        this.color = options.color;
+        this.q = new QTable();
+        this.memory = [];
+      }
+
+      reset(x, y, angle) {
+        this.x = x;
+        this.y = y;
+        this.angle = angle;
+        this.v = 0;
+        this.health = 100;
+        this.memory = [];
+      }
+
+      state(opponent) {
+        const dx = opponent.x - this.x;
+        const dy = opponent.y - this.y;
+        const dist = Math.hypot(dx, dy);
+        const relAngle = Math.atan2(dy, dx);
+        const angleDiff = ((relAngle - this.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+
+        const distBin = bucket(dist, 5, Math.hypot(WORLD.w, WORLD.h));
+        const angBin = bucket(angleDiff + Math.PI, 8, Math.PI * 2);
+        const speedBin = bucket(Math.abs(this.v), 4, 9);
+        const oppSpeedBin = bucket(Math.abs(opponent.v), 4, 9);
+        return [distBin, angBin, speedBin, oppSpeedBin];
+      }
+
+      chooseAction(opponent, epsilon) {
+        const stateKey = this.state(opponent);
+        const qs = this.q.get(stateKey);
+        let actionIdx;
+        if (Math.random() < epsilon) {
+          actionIdx = Math.floor(Math.random() * ACTIONS.length);
+        } else {
+          const max = Math.max(...qs);
+          const best = [];
+          qs.forEach((v, i) => v === max && best.push(i));
+          actionIdx = best[Math.floor(Math.random() * best.length)];
+        }
+        this.memory.push({ stateKey, actionIdx });
+        return ACTIONS[actionIdx];
+      }
+
+      applyAction(action) {
+        const accel = 0.55;
+        const turn = 0.09;
+        if (action === "accelerate") this.v += accel;
+        if (action === "brake") this.v -= accel * 1.2;
+        if (action === "left") this.angle -= turn;
+        if (action === "right") this.angle += turn;
+        this.v = clamp(this.v, -6, 9);
+      }
+
+      move() {
+        this.x += Math.cos(this.angle) * this.v;
+        this.y += Math.sin(this.angle) * this.v;
+        this.v *= WORLD.friction;
+      }
+    }
+
+    const blue = new Car({ name: "Blue", color: "#60a5fa" });
+    const red = new Car({ name: "Red", color: "#f472b6" });
+
+    function resetEpisode() {
+      blue.reset(WORLD.margin + 80, WORLD.margin + 80, 0);
+      red.reset(WORLD.w - WORLD.margin - 80, WORLD.h - WORLD.margin - 80, Math.PI);
+      blue.episodes += 1;
+      red.episodes += 1;
+    }
+
+    resetEpisode();
+
+    let running = true;
+    let epsilon = 0.2;
+    const epsilonFloor = 0.02;
+    const decay = 0.9995;
+    const alpha = 0.25;
+    const gamma = 0.93;
+
+    function handleCollisions() {
+      let damageBlue = 0;
+      let damageRed = 0;
+
+      // Wall collision
+      [blue, red].forEach((car) => {
+        const minX = WORLD.margin;
+        const maxX = WORLD.w - WORLD.margin;
+        const minY = WORLD.margin;
+        const maxY = WORLD.h - WORLD.margin;
+        if (car.x < minX || car.x > maxX || car.y < minY || car.y > maxY) {
+          car.v *= -0.3;
+          car.health -= WORLD.wallDamage * Math.abs(car.v) * WORLD.dt * 3;
+          car.x = clamp(car.x, minX, maxX);
+          car.y = clamp(car.y, minY, maxY);
+          if (car === blue) damageBlue += WORLD.wallDamage;
+          else damageRed += WORLD.wallDamage;
+        }
+      });
+
+      // Car-to-car collision
+      const dx = blue.x - red.x;
+      const dy = blue.y - red.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < WORLD.collisionRadius * 2) {
+        const normalX = dx / (dist || 1);
+        const normalY = dy / (dist || 1);
+        const relVel = blue.v - red.v;
+        const impulse = relVel * 0.6;
+        blue.v -= impulse * normalX;
+        red.v += impulse * normalX;
+
+        const impact = Math.abs(relVel) * 12;
+        blue.health -= impact * 0.6;
+        red.health -= impact * 0.6;
+
+        // attacker bonus goes to faster car
+        if (blue.v > red.v) {
+          red.health -= impact * 0.4;
+          damageRed += impact;
+        } else {
+          blue.health -= impact * 0.4;
+          damageBlue += impact;
+        }
+      }
+      return { damageBlue, damageRed };
+    }
+
+    function updateRewards(damageBlue, damageRed) {
+      const rewardBlue = damageRed * 1.2 - damageBlue * 0.9 + 0.05;
+      const rewardRed = damageBlue * 1.2 - damageRed * 0.9 + 0.05;
+      const nextBlue = blue.state(red);
+      const nextRed = red.state(blue);
+
+      const lastBlue = blue.memory.at(-1);
+      const lastRed = red.memory.at(-1);
+      if (lastBlue) blue.q.update(lastBlue.stateKey, lastBlue.actionIdx, rewardBlue, nextBlue, gamma, alpha);
+      if (lastRed) red.q.update(lastRed.stateKey, lastRed.actionIdx, rewardRed, nextRed, gamma, alpha);
+    }
+
+    function step() {
+      if (!running) return;
+      epsilon = Math.max(epsilonFloor, epsilon * decay);
+
+      const blueAction = blue.chooseAction(red, epsilon);
+      const redAction = red.chooseAction(blue, epsilon);
+      blue.applyAction(blueAction);
+      red.applyAction(redAction);
+
+      blue.move();
+      red.move();
+
+      const { damageBlue, damageRed } = handleCollisions();
+      updateRewards(damageBlue, damageRed);
+
+      if (blue.health <= 0 || red.health <= 0) {
+        if (blue.health <= 0 && red.health <= 0) {
+          // double knockout, reward nothing special
+        } else if (blue.health <= 0) {
+          red.wins += 1;
+          red.q.update(red.memory.at(-1).stateKey, red.memory.at(-1).actionIdx, 10, red.state(blue), gamma, alpha);
+        } else if (red.health <= 0) {
+          blue.wins += 1;
+          blue.q.update(blue.memory.at(-1).stateKey, blue.memory.at(-1).actionIdx, 10, blue.state(red), gamma, alpha);
+        }
+        resetEpisode();
+      }
+    }
+
+    function drawArena() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+
+      ctx.strokeStyle = "#1f2a48";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(WORLD.margin, WORLD.margin, WORLD.w - WORLD.margin * 2, WORLD.h - WORLD.margin * 2);
+
+      for (let i = WORLD.margin; i < WORLD.w - WORLD.margin; i += 60) {
+        ctx.strokeStyle = "rgba(255,255,255,0.04)";
+        ctx.beginPath();
+        ctx.moveTo(i, WORLD.margin);
+        ctx.lineTo(i, WORLD.h - WORLD.margin);
+        ctx.stroke();
+      }
+
+      for (let j = WORLD.margin; j < WORLD.h - WORLD.margin; j += 60) {
+        ctx.strokeStyle = "rgba(255,255,255,0.04)";
+        ctx.beginPath();
+        ctx.moveTo(WORLD.margin, j);
+        ctx.lineTo(WORLD.w - WORLD.margin, j);
+        ctx.stroke();
+      }
+
+      drawCar(blue);
+      drawCar(red);
+      drawDamagePulse();
+      ctx.restore();
+    }
+
+    const pulses = [];
+    function drawDamagePulse() {
+      pulses.forEach((p) => {
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(250, 204, 21, ${p.a})`;
+        ctx.lineWidth = 4;
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      for (let i = pulses.length - 1; i >= 0; i--) {
+        pulses[i].r += 2.5;
+        pulses[i].a -= 0.03;
+        if (pulses[i].a <= 0) pulses.splice(i, 1);
+      }
+    }
+
+    function drawCar(car) {
+      ctx.save();
+      ctx.translate(car.x, car.y);
+      ctx.rotate(car.angle);
+      ctx.fillStyle = car.color;
+      ctx.strokeStyle = "rgba(255,255,255,0.4)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(-16, -10, 32, 20, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      ctx.fillRect(0, -6, 10, 12);
+
+      ctx.restore();
+
+      // health bar
+      ctx.fillStyle = "rgba(255,255,255,0.15)";
+      ctx.fillRect(car.x - 20, car.y - 28, 40, 6);
+      ctx.fillStyle = car.color;
+      ctx.fillRect(car.x - 20, car.y - 28, 40 * (car.health / 100), 6);
+      if (car.health < 30) ctx.fillStyle = "#facc15";
+    }
+
+    function updateStats() {
+      statsEl.innerHTML = "";
+      const data = [
+        { label: "Blue health", value: blue.health.toFixed(1) + "%" },
+        { label: "Red health", value: red.health.toFixed(1) + "%" },
+        { label: "Blue wins", value: blue.wins },
+        { label: "Red wins", value: red.wins },
+        { label: "Episodes", value: Math.max(blue.episodes, red.episodes) },
+        { label: "Exploration", value: `ε = ${epsilon.toFixed(3)}` },
+      ];
+      data.forEach((d) => {
+        const card = document.createElement("div");
+        card.className = "stat-card";
+        card.innerHTML = `<strong>${d.label}</strong><span>${d.value}</span>`;
+        statsEl.appendChild(card);
+      });
+    }
+
+    function loop() {
+      step();
+      drawArena();
+      updateStats();
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+
+    document.getElementById("toggle").addEventListener("click", (e) => {
+      running = !running;
+      e.target.textContent = running ? "Pause" : "Resume";
+    });
+
+    document.getElementById("reset").addEventListener("click", () => {
+      resetEpisode();
+    });
+
+    document.getElementById("boost").addEventListener("click", () => {
+      pulses.push({ x: red.x, y: red.y, r: 12, a: 0.6 });
+      red.q.update(red.state(blue), 0, 5, red.state(blue), gamma, alpha);
+    });
+
+    // Add slight camera pulse on strong impacts
+    setInterval(() => {
+      const lastPulse = pulses.at(-1);
+      if (lastPulse) {
+        canvas.style.transform = "translateZ(0) scale(1.01)";
+        setTimeout(() => (canvas.style.transform = ""), 80);
+      }
+    }, 120);
+  </script>
+</body>
+</html>
