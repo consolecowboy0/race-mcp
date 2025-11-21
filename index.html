@@ -195,10 +195,10 @@
       <h2>How the duel works</h2>
       <ul>
         <li>Both cars learn online with a lightweight <strong>double Q-learning</strong> setup backed by a replay buffer and an annealed <strong>epsilon-greedy</strong> policy.</li>
-        <li>The state now tracks coarse distance, relative angle, forward speeds, approach velocity, and wall proximity so agents sense both positioning and danger.</li>
+        <li>The state captures coarse distance, relative angle, and each car's speed so the agents can reason about closing speed and positioning.</li>
         <li>Actions are accelerate, brake, coast, or steer left/right. Each move applies damage from impacts or wall slaps.</li>
-        <li>Rewards blend impact damage, survival bonus, stall penalties, and <strong>dense shaping</strong> for closing speed, heading alignment, and avoiding walls.</li>
-        <li>Episodes end when one hull reaches 0%. The surviving car earns a larger win bonus and the Q-tables are updated from replayed transitions every step.</li>
+        <li>Rewards combine impact damage, survival bonus, penalties for idling, and <strong>dense shaping</strong> for moving toward the opponent.</li>
+        <li>Episodes end when one hull reaches 0%. The surviving car gets a win bonus and the Q-tables are updated from replayed transitions every step.</li>
       </ul>
     </section>
   </main>
@@ -340,6 +340,12 @@
         return qA.map((v, i) => v + qB[i]);
       }
 
+      qValues(stateKey) {
+        const qA = this.q1.get(stateKey);
+        const qB = this.q2.get(stateKey);
+        return qA.map((v, i) => v + qB[i]);
+      }
+
       chooseAction(stateKey, epsilon) {
         const qs = this.qValues(stateKey);
         let actionIdx;
@@ -374,25 +380,23 @@
         this.buffer.push({ stateKey, actionIdx, reward, nextStateKey, done });
       }
 
-      learn(batchSize, gamma, alpha, passes = 1) {
-        if (this.buffer.size < Math.min(batchSize, 6)) return;
-        for (let pass = 0; pass < passes; pass++) {
-          const samples = this.buffer.sample(Math.min(batchSize, this.buffer.size));
-          samples.forEach(({ stateKey, actionIdx, reward, nextStateKey, done }) => {
-            const updateQ1 = Math.random() < 0.5;
-            const currentQ = updateQ1 ? this.q1 : this.q2;
-            const targetQ = updateQ1 ? this.q2 : this.q1;
+      learn(batchSize, gamma, alpha) {
+        if (this.buffer.size === 0) return;
+        const samples = this.buffer.sample(Math.min(batchSize, this.buffer.size));
+        samples.forEach(({ stateKey, actionIdx, reward, nextStateKey, done }) => {
+          const updateQ1 = Math.random() < 0.5;
+          const currentQ = updateQ1 ? this.q1 : this.q2;
+          const targetQ = updateQ1 ? this.q2 : this.q1;
 
-            const nextForSelection = updateQ1 ? this.q1.get(nextStateKey) : this.q2.get(nextStateKey);
-            const bestNextIdx = nextForSelection.indexOf(Math.max(...nextForSelection));
-            const nextForEval = targetQ.get(nextStateKey);
-            const bootstrap = done ? 0 : gamma * nextForEval[bestNextIdx];
+          const nextForSelection = updateQ1 ? this.q1.get(nextStateKey) : this.q2.get(nextStateKey);
+          const bestNextIdx = nextForSelection.indexOf(Math.max(...nextForSelection));
+          const nextForEval = targetQ.get(nextStateKey);
+          const bootstrap = done ? 0 : gamma * nextForEval[bestNextIdx];
 
-            const qValues = currentQ.get(stateKey);
-            const target = reward + bootstrap;
-            qValues[actionIdx] += alpha * (target - qValues[actionIdx]);
-          });
-        }
+          const qValues = currentQ.get(stateKey);
+          const target = reward + bootstrap;
+          qValues[actionIdx] += alpha * (target - qValues[actionIdx]);
+        });
       }
     }
 
@@ -409,13 +413,12 @@
     resetEpisode();
 
     let running = true;
-    let epsilon = 0.35;
-    const epsilonFloor = 0.02;
-    const decay = 0.9991;
-    const alpha = 0.18;
-    const gamma = 0.985;
-    const batchSize = 18;
-    const learnPasses = 2;
+    let epsilon = 0.2;
+    const epsilonFloor = 0.01;
+    const decay = 0.9993;
+    const alpha = 0.22;
+    const gamma = 0.96;
+    const batchSize = 12;
 
     function handleCollisions() {
       let damageBlue = 0;
@@ -469,7 +472,7 @@
           damageBlue += impact;
         }
       }
-      return { damageBlue, damageRed, wallHitBlue, wallHitRed };
+      return { damageBlue, damageRed };
     }
 
     function computeReward({
@@ -479,49 +482,16 @@
       nextDist,
       blueSpeed,
       redSpeed,
-      closingBlue,
-      closingRed,
-      aimBlue,
-      aimRed,
-      wallHitBlue,
-      wallHitRed,
     }) {
       const distanceGain = clamp(prevDist - nextDist, -40, 40);
-      const proximityShaping = distanceGain * 0.07;
-      const closingBonusBlue = closingBlue * 0.04;
-      const closingBonusRed = closingRed * 0.04;
-
-      const survivalBonus = 0.018;
-      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.25 ? -0.09 : 0;
-      const stallPenaltyRed = Math.abs(redSpeed) < 0.25 ? -0.09 : 0;
-      const wallPenaltyBlue = wallHitBlue ? -0.7 : 0;
-      const wallPenaltyRed = wallHitRed ? -0.7 : 0;
-      const stepPenalty = -0.01;
-
-      const aimBonusBlue = (1 - aimBlue / Math.PI) * 0.1;
-      const aimBonusRed = (1 - aimRed / Math.PI) * 0.1;
+      const proximityShaping = distanceGain * 0.08;
+      const survivalBonus = 0.015;
+      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.25 ? -0.08 : 0;
+      const stallPenaltyRed = Math.abs(redSpeed) < 0.25 ? -0.08 : 0;
 
       return {
-        rewardBlue:
-          damageRed * 0.6 -
-          damageBlue * 0.7 +
-          proximityShaping +
-          closingBonusBlue +
-          survivalBonus +
-          stallPenaltyBlue +
-          wallPenaltyBlue +
-          aimBonusBlue +
-          stepPenalty,
-        rewardRed:
-          damageBlue * 0.6 -
-          damageRed * 0.7 -
-          proximityShaping +
-          closingBonusRed +
-          survivalBonus +
-          stallPenaltyRed +
-          wallPenaltyRed +
-          aimBonusRed +
-          stepPenalty,
+        rewardBlue: damageRed * 0.6 - damageBlue * 0.7 + proximityShaping + survivalBonus + stallPenaltyBlue,
+        rewardRed: damageBlue * 0.6 - damageRed * 0.7 - proximityShaping + survivalBonus + stallPenaltyRed,
       };
     }
 
@@ -541,15 +511,10 @@
       blue.move();
       red.move();
 
-      const { damageBlue, damageRed, wallHitBlue, wallHitRed } = handleCollisions();
+      const { damageBlue, damageRed } = handleCollisions();
       const nextBlue = blue.state(red);
       const nextRed = red.state(blue);
       const nextDist = Math.hypot(blue.x - red.x, blue.y - red.y);
-
-      const closingBlue = closingVelocity(blue, red);
-      const closingRed = closingVelocity(red, blue);
-      const aimBlue = Math.abs(((blue.angle - Math.atan2(red.y - blue.y, red.x - blue.x) + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
-      const aimRed = Math.abs(((red.angle - Math.atan2(blue.y - red.y, blue.x - red.x) + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
 
       let { rewardBlue, rewardRed } = computeReward({
         damageBlue,
@@ -558,12 +523,6 @@
         nextDist,
         blueSpeed: blue.v,
         redSpeed: red.v,
-        closingBlue,
-        closingRed,
-        aimBlue,
-        aimRed,
-        wallHitBlue,
-        wallHitRed,
       });
 
       let done = false;
@@ -572,18 +531,18 @@
         if (blue.health <= 0 && red.health <= 0) {
           // double knockout, neutral ending
         } else if (blue.health <= 0) {
-          rewardRed += 18;
+          rewardRed += 12;
           red.wins += 1;
         } else if (red.health <= 0) {
-          rewardBlue += 18;
+          rewardBlue += 12;
           blue.wins += 1;
         }
       }
 
       blue.remember(blueState, blueIdx, rewardBlue, nextBlue, done);
       red.remember(redState, redIdx, rewardRed, nextRed, done);
-      blue.learn(batchSize, gamma, alpha, learnPasses);
-      red.learn(batchSize, gamma, alpha, learnPasses);
+      blue.learn(batchSize, gamma, alpha);
+      red.learn(batchSize, gamma, alpha);
 
       if (done) {
         resetEpisode();
