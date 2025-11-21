@@ -163,6 +163,57 @@
       line-height: 1.5;
     }
 
+    .hype {
+      margin: 1rem 0 1.2rem;
+    }
+
+    .hype-label {
+      color: #cbd5e1;
+      font-size: 0.95rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .hype-bar {
+      width: 100%;
+      height: 14px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .hype-fill {
+      height: 100%;
+      width: 10%;
+      border-radius: 8px;
+      background: linear-gradient(90deg, #22d3ee, #a855f7, #f472b6);
+      box-shadow: 0 0 12px rgba(244, 114, 182, 0.6);
+      transition: width 0.1s ease-out, filter 0.2s ease-out;
+    }
+
+    .hype-caption {
+      margin-top: 0.35rem;
+      color: #94a3b8;
+      font-size: 0.9rem;
+    }
+
+    .commentary ul {
+      list-style: none;
+      padding-left: 0;
+      margin-top: 0.4rem;
+      display: grid;
+      gap: 0.35rem;
+    }
+
+    .commentary li {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 0.5rem 0.7rem;
+      border-radius: 10px;
+      color: #e2e8f0;
+      font-size: 0.95rem;
+    }
+
     footer {
       grid-column: 1 / span 2;
       padding: 0 2rem 1.5rem;
@@ -192,6 +243,15 @@
         <span class="legend-item"><span class="chip" style="background:#facc15"></span>Impulse damage</span>
       </div>
       <div class="stats" id="stats"></div>
+      <div class="hype">
+        <div class="hype-label">Arena hype</div>
+        <div class="hype-bar"><div class="hype-fill"></div></div>
+        <div class="hype-caption">Builds on hard hits, drifts, and close shaves</div>
+      </div>
+      <div class="commentary">
+        <h2>Commentary feed</h2>
+        <ul id="event-log"></ul>
+      </div>
       <h2>How the duel works</h2>
       <ul>
         <li>Both cars learn online with a lightweight <strong>double Q-learning</strong> setup backed by a replay buffer and an annealed <strong>epsilon-greedy</strong> policy.</li>
@@ -211,18 +271,36 @@
     const canvas = document.getElementById("arena");
     const ctx = canvas.getContext("2d");
     const statsEl = document.getElementById("stats");
+    const logEl = document.getElementById("event-log");
+    const hypeFill = document.querySelector(".hype-fill");
 
     const WORLD = {
       w: canvas.width,
       h: canvas.height,
       margin: 40,
-      wallDamage: 10,
-      friction: 0.97,
+      wallDamage: 14,
+      friction: 0.971,
       dt: 1 / 60,
       collisionRadius: 18,
     };
 
     const ACTIONS = ["accelerate", "brake", "left", "right", "coast"];
+
+    let hype = 0.1;
+    function addLog(message) {
+      const item = document.createElement("li");
+      item.textContent = message;
+      logEl.prepend(item);
+      while (logEl.children.length > 7) {
+        logEl.removeChild(logEl.lastChild);
+      }
+    }
+
+    function updateHypeBar(delta = -0.004) {
+      hype = clamp(hype + delta, 0, 1);
+      hypeFill.style.width = `${(hype * 100).toFixed(0)}%`;
+      hypeFill.style.filter = `saturate(${0.8 + hype * 0.6}) drop-shadow(0 0 ${12 * hype}px rgba(244, 114, 182, 0.6))`;
+    }
 
     function closingVelocity(self, opponent) {
       const dx = opponent.x - self.x;
@@ -261,8 +339,10 @@
       }
     }
 
+    const REPLAY_CAPACITY = 16000;
+
     class ReplayBuffer {
-      constructor(capacity = 4000) {
+      constructor(capacity = REPLAY_CAPACITY) {
         this.capacity = capacity;
         this.buffer = [];
       }
@@ -413,18 +493,20 @@
     resetEpisode();
 
     let running = true;
-    let epsilon = 0.2;
-    const epsilonFloor = 0.01;
-    const decay = 0.9993;
-    const alpha = 0.22;
-    const gamma = 0.96;
-    const batchSize = 12;
+    let epsilon = 0.18;
+    const epsilonFloor = 0.02;
+    const decay = 0.9985;
+    const alpha = 0.26;
+    const gamma = 0.965;
+    const batchSize = 16;
+    const updatesPerStep = 2;
 
     function handleCollisions() {
       let damageBlue = 0;
       let damageRed = 0;
       let wallHitBlue = false;
       let wallHitRed = false;
+      let impactEvent = null;
 
       // Wall collision
       [blue, red].forEach((car) => {
@@ -463,6 +545,16 @@
         blue.health -= impact * 0.6;
         red.health -= impact * 0.6;
 
+        impactEvent = {
+          x: (blue.x + red.x) / 2,
+          y: (blue.y + red.y) / 2,
+          impact,
+        };
+        if (impact > 6) {
+          pulses.push({ x: impactEvent.x, y: impactEvent.y, r: 10, a: 0.8 });
+          spawnSparks(impactEvent.x, impactEvent.y, impact);
+        }
+
         // attacker bonus goes to faster car
         if (blue.v > red.v) {
           red.health -= impact * 0.4;
@@ -472,7 +564,7 @@
           damageBlue += impact;
         }
       }
-      return { damageBlue, damageRed };
+      return { damageBlue, damageRed, wallHitBlue, wallHitRed, impactEvent };
     }
 
     function computeReward({
@@ -482,36 +574,59 @@
       nextDist,
       blueSpeed,
       redSpeed,
+      closingBlue,
+      closingRed,
     }) {
       const distanceGain = clamp(prevDist - nextDist, -40, 40);
-      const proximityShaping = distanceGain * 0.08;
-      const survivalBonus = 0.015;
-      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.25 ? -0.08 : 0;
-      const stallPenaltyRed = Math.abs(redSpeed) < 0.25 ? -0.08 : 0;
+      const proximityShaping = distanceGain * 0.11;
+      const closingBonusBlue = clamp(closingBlue, -10, 10) * 0.05;
+      const closingBonusRed = clamp(closingRed, -10, 10) * 0.05;
+      const survivalBonus = 0.02;
+      const driftPenaltyBlue = nextDist > prevDist ? -0.02 : 0;
+      const driftPenaltyRed = prevDist < nextDist ? -0.02 : 0;
+      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.35 ? -0.12 : 0;
+      const stallPenaltyRed = Math.abs(redSpeed) < 0.35 ? -0.12 : 0;
 
       return {
-        rewardBlue: damageRed * 0.6 - damageBlue * 0.7 + proximityShaping + survivalBonus + stallPenaltyBlue,
-        rewardRed: damageBlue * 0.6 - damageRed * 0.7 - proximityShaping + survivalBonus + stallPenaltyRed,
+        rewardBlue:
+          damageRed * 0.6 -
+          damageBlue * 0.7 +
+          proximityShaping +
+          closingBonusBlue +
+          survivalBonus +
+          stallPenaltyBlue +
+          driftPenaltyBlue,
+        rewardRed:
+          damageBlue * 0.6 -
+          damageRed * 0.7 -
+          proximityShaping +
+          closingBonusRed +
+          survivalBonus +
+          stallPenaltyRed +
+          driftPenaltyRed,
       };
     }
 
-    function step() {
-      if (!running) return;
-      epsilon = Math.max(epsilonFloor, epsilon * decay);
+    function step(trainingOnly = false, epsilonOverride = null) {
+      if (!trainingOnly && !running) return;
+      if (epsilonOverride === null) {
+        epsilon = Math.max(epsilonFloor, epsilon * decay);
+      }
 
       const prevDist = Math.hypot(blue.x - red.x, blue.y - red.y);
       const blueState = blue.state(red);
       const redState = red.state(blue);
 
-      const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, epsilon);
-      const { action: redAction, actionIdx: redIdx } = red.chooseAction(redState, epsilon);
+      const explore = epsilonOverride ?? epsilon;
+      const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, explore);
+      const { action: redAction, actionIdx: redIdx } = red.chooseAction(redState, explore);
       blue.applyAction(blueAction);
       red.applyAction(redAction);
 
       blue.move();
       red.move();
 
-      const { damageBlue, damageRed } = handleCollisions();
+      const { damageBlue, damageRed, wallHitBlue, wallHitRed, impactEvent } = handleCollisions();
       const nextBlue = blue.state(red);
       const nextRed = red.state(blue);
       const nextDist = Math.hypot(blue.x - red.x, blue.y - red.y);
@@ -523,7 +638,30 @@
         nextDist,
         blueSpeed: blue.v,
         redSpeed: red.v,
+        closingBlue: closingVelocity(blue, red),
+        closingRed: closingVelocity(red, blue),
       });
+
+      if (!trainingOnly) {
+        // narrative overlays
+        if (impactEvent && impactEvent.impact > 8) {
+          addLog(
+            impactEvent.impact > 14
+              ? "Massive slam! Both cars reel from the hit."
+              : "Solid ram lands – chassis shaking!"
+          );
+          updateHypeBar(impactEvent.impact / 300);
+        } else if (!impactEvent && prevDist < 120 && nextDist > prevDist && Math.random() < 0.25) {
+          addLog("Near miss – they drift past with inches to spare.");
+          updateHypeBar(0.015);
+        }
+        if (wallHitBlue || wallHitRed) {
+          addLog(`${wallHitBlue ? "Blue" : "Red"} scrapes the wall!`);
+          updateHypeBar(0.01);
+        }
+
+        updateHypeBar();
+      }
 
       let done = false;
       if (blue.health <= 0 || red.health <= 0) {
@@ -541,8 +679,10 @@
 
       blue.remember(blueState, blueIdx, rewardBlue, nextBlue, done);
       red.remember(redState, redIdx, rewardRed, nextRed, done);
-      blue.learn(batchSize, gamma, alpha);
-      red.learn(batchSize, gamma, alpha);
+      for (let i = 0; i < updatesPerStep; i++) {
+        blue.learn(batchSize, gamma, alpha);
+        red.learn(batchSize, gamma, alpha);
+      }
 
       if (done) {
         resetEpisode();
@@ -576,10 +716,47 @@
       drawCar(blue);
       drawCar(red);
       drawDamagePulse();
+      drawSparks();
       ctx.restore();
     }
 
     const pulses = [];
+    const sparks = [];
+
+    function spawnSparks(x, y, intensity) {
+      const count = clamp(Math.floor(intensity / 2), 6, 22);
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 3 + intensity * 0.05;
+        sparks.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1,
+        });
+      }
+    }
+
+    function drawSparks() {
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const p = sparks[i];
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(250, 204, 21, ${p.life})`;
+        ctx.lineWidth = 2;
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 2, p.y - p.vy * 2);
+        ctx.stroke();
+
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.96;
+        p.vy *= 0.96;
+        p.life -= 0.02;
+        if (p.life <= 0) sparks.splice(i, 1);
+      }
+    }
+
     function drawDamagePulse() {
       pulses.forEach((p) => {
         ctx.beginPath();
@@ -629,7 +806,7 @@
         { label: "Red wins", value: red.wins },
         { label: "Episodes", value: Math.max(blue.episodes, red.episodes) },
         { label: "Exploration", value: `ε = ${epsilon.toFixed(3)}` },
-        { label: "Replay size", value: `${blue.buffer.size}` },
+        { label: "Replay size", value: `${blue.buffer.size} / ${REPLAY_CAPACITY}` },
       ];
       data.forEach((d) => {
         const card = document.createElement("div");
@@ -646,6 +823,17 @@
       requestAnimationFrame(loop);
     }
 
+    function warmupReplay(iterations = 420) {
+      resetEpisode();
+      for (let i = 0; i < iterations; i++) {
+        const annealed = 0.5 - (0.4 * i) / iterations; // start random, taper down
+        step(true, Math.max(0.08, annealed));
+      }
+      epsilon = Math.max(0.05, epsilon * Math.pow(decay, iterations));
+      resetEpisode();
+    }
+
+    warmupReplay();
     loop();
 
     document.getElementById("toggle").addEventListener("click", (e) => {
