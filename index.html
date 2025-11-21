@@ -194,11 +194,11 @@
       <div class="stats" id="stats"></div>
       <h2>How the duel works</h2>
       <ul>
-        <li>Both cars learn online with Q-learning using an <strong>epsilon-greedy</strong> policy that slowly anneals.</li>
-        <li>The state is a coarse encoding of distance, angle to target, and current speed.</li>
+        <li>Both cars learn online with a lightweight <strong>double Q-learning</strong> setup backed by a replay buffer and an annealed <strong>epsilon-greedy</strong> policy.</li>
+        <li>The state captures coarse distance, relative angle, and each car's speed so the agents can reason about closing speed and positioning.</li>
         <li>Actions are accelerate, brake, coast, or steer left/right. Each move applies damage from impacts or wall slaps.</li>
-        <li>Rewards: +damage to opponent, -self damage, a small survival bonus, and a penalty for stalling.</li>
-        <li>Episodes end when one hull reaches 0%. The surviving car gets a win and the Q-table is updated across steps.</li>
+        <li>Rewards combine impact damage, survival bonus, penalties for idling, and <strong>dense shaping</strong> for moving toward the opponent.</li>
+        <li>Episodes end when one hull reaches 0%. The surviving car gets a win bonus and the Q-tables are updated from replayed transitions every step.</li>
       </ul>
     </section>
   </main>
@@ -246,11 +246,31 @@
         }
         return this.table.get(key);
       }
-      update(stateKey, actionIdx, reward, nextStateKey, gamma, alpha) {
-        const q = this.get(stateKey);
-        const next = this.get(nextStateKey);
-        const target = reward + gamma * Math.max(...next);
-        q[actionIdx] += alpha * (target - q[actionIdx]);
+    }
+
+    class ReplayBuffer {
+      constructor(capacity = 4000) {
+        this.capacity = capacity;
+        this.buffer = [];
+      }
+
+      push(transition) {
+        if (this.buffer.length >= this.capacity) {
+          this.buffer.shift();
+        }
+        this.buffer.push(transition);
+      }
+
+      sample(batchSize) {
+        const out = [];
+        for (let i = 0; i < batchSize; i++) {
+          out.push(this.buffer[Math.floor(Math.random() * this.buffer.length)]);
+        }
+        return out;
+      }
+
+      get size() {
+        return this.buffer.length;
       }
     }
 
@@ -262,8 +282,9 @@
         this.wins = 0;
         this.episodes = 0;
         this.color = options.color;
-        this.q = new QTable();
-        this.memory = [];
+        this.q1 = new QTable();
+        this.q2 = new QTable();
+        this.buffer = new ReplayBuffer();
       }
 
       reset(x, y, angle) {
@@ -272,7 +293,6 @@
         this.angle = angle;
         this.v = 0;
         this.health = 100;
-        this.memory = [];
       }
 
       state(opponent) {
@@ -289,9 +309,14 @@
         return [distBin, angBin, speedBin, oppSpeedBin];
       }
 
-      chooseAction(opponent, epsilon) {
-        const stateKey = this.state(opponent);
-        const qs = this.q.get(stateKey);
+      qValues(stateKey) {
+        const qA = this.q1.get(stateKey);
+        const qB = this.q2.get(stateKey);
+        return qA.map((v, i) => v + qB[i]);
+      }
+
+      chooseAction(stateKey, epsilon) {
+        const qs = this.qValues(stateKey);
         let actionIdx;
         if (Math.random() < epsilon) {
           actionIdx = Math.floor(Math.random() * ACTIONS.length);
@@ -301,8 +326,7 @@
           qs.forEach((v, i) => v === max && best.push(i));
           actionIdx = best[Math.floor(Math.random() * best.length)];
         }
-        this.memory.push({ stateKey, actionIdx });
-        return ACTIONS[actionIdx];
+        return { action: ACTIONS[actionIdx], actionIdx };
       }
 
       applyAction(action) {
@@ -320,6 +344,29 @@
         this.y += Math.sin(this.angle) * this.v;
         this.v *= WORLD.friction;
       }
+
+      remember(stateKey, actionIdx, reward, nextStateKey, done) {
+        this.buffer.push({ stateKey, actionIdx, reward, nextStateKey, done });
+      }
+
+      learn(batchSize, gamma, alpha) {
+        if (this.buffer.size === 0) return;
+        const samples = this.buffer.sample(Math.min(batchSize, this.buffer.size));
+        samples.forEach(({ stateKey, actionIdx, reward, nextStateKey, done }) => {
+          const updateQ1 = Math.random() < 0.5;
+          const currentQ = updateQ1 ? this.q1 : this.q2;
+          const targetQ = updateQ1 ? this.q2 : this.q1;
+
+          const nextForSelection = updateQ1 ? this.q1.get(nextStateKey) : this.q2.get(nextStateKey);
+          const bestNextIdx = nextForSelection.indexOf(Math.max(...nextForSelection));
+          const nextForEval = targetQ.get(nextStateKey);
+          const bootstrap = done ? 0 : gamma * nextForEval[bestNextIdx];
+
+          const qValues = currentQ.get(stateKey);
+          const target = reward + bootstrap;
+          qValues[actionIdx] += alpha * (target - qValues[actionIdx]);
+        });
+      }
     }
 
     const blue = new Car({ name: "Blue", color: "#60a5fa" });
@@ -336,10 +383,11 @@
 
     let running = true;
     let epsilon = 0.2;
-    const epsilonFloor = 0.02;
-    const decay = 0.9995;
-    const alpha = 0.25;
-    const gamma = 0.93;
+    const epsilonFloor = 0.01;
+    const decay = 0.9993;
+    const alpha = 0.22;
+    const gamma = 0.96;
+    const batchSize = 12;
 
     function handleCollisions() {
       let damageBlue = 0;
@@ -389,24 +437,36 @@
       return { damageBlue, damageRed };
     }
 
-    function updateRewards(damageBlue, damageRed) {
-      const rewardBlue = damageRed * 1.2 - damageBlue * 0.9 + 0.05;
-      const rewardRed = damageBlue * 1.2 - damageRed * 0.9 + 0.05;
-      const nextBlue = blue.state(red);
-      const nextRed = red.state(blue);
+    function computeReward({
+      damageBlue,
+      damageRed,
+      prevDist,
+      nextDist,
+      blueSpeed,
+      redSpeed,
+    }) {
+      const distanceGain = clamp(prevDist - nextDist, -40, 40);
+      const proximityShaping = distanceGain * 0.08;
+      const survivalBonus = 0.015;
+      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.25 ? -0.08 : 0;
+      const stallPenaltyRed = Math.abs(redSpeed) < 0.25 ? -0.08 : 0;
 
-      const lastBlue = blue.memory.at(-1);
-      const lastRed = red.memory.at(-1);
-      if (lastBlue) blue.q.update(lastBlue.stateKey, lastBlue.actionIdx, rewardBlue, nextBlue, gamma, alpha);
-      if (lastRed) red.q.update(lastRed.stateKey, lastRed.actionIdx, rewardRed, nextRed, gamma, alpha);
+      return {
+        rewardBlue: damageRed * 0.6 - damageBlue * 0.7 + proximityShaping + survivalBonus + stallPenaltyBlue,
+        rewardRed: damageBlue * 0.6 - damageRed * 0.7 - proximityShaping + survivalBonus + stallPenaltyRed,
+      };
     }
 
     function step() {
       if (!running) return;
       epsilon = Math.max(epsilonFloor, epsilon * decay);
 
-      const blueAction = blue.chooseAction(red, epsilon);
-      const redAction = red.chooseAction(blue, epsilon);
+      const prevDist = Math.hypot(blue.x - red.x, blue.y - red.y);
+      const blueState = blue.state(red);
+      const redState = red.state(blue);
+
+      const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, epsilon);
+      const { action: redAction, actionIdx: redIdx } = red.chooseAction(redState, epsilon);
       blue.applyAction(blueAction);
       red.applyAction(redAction);
 
@@ -414,18 +474,39 @@
       red.move();
 
       const { damageBlue, damageRed } = handleCollisions();
-      updateRewards(damageBlue, damageRed);
+      const nextBlue = blue.state(red);
+      const nextRed = red.state(blue);
+      const nextDist = Math.hypot(blue.x - red.x, blue.y - red.y);
 
+      let { rewardBlue, rewardRed } = computeReward({
+        damageBlue,
+        damageRed,
+        prevDist,
+        nextDist,
+        blueSpeed: blue.v,
+        redSpeed: red.v,
+      });
+
+      let done = false;
       if (blue.health <= 0 || red.health <= 0) {
+        done = true;
         if (blue.health <= 0 && red.health <= 0) {
-          // double knockout, reward nothing special
+          // double knockout, neutral ending
         } else if (blue.health <= 0) {
+          rewardRed += 12;
           red.wins += 1;
-          red.q.update(red.memory.at(-1).stateKey, red.memory.at(-1).actionIdx, 10, red.state(blue), gamma, alpha);
         } else if (red.health <= 0) {
+          rewardBlue += 12;
           blue.wins += 1;
-          blue.q.update(blue.memory.at(-1).stateKey, blue.memory.at(-1).actionIdx, 10, blue.state(red), gamma, alpha);
         }
+      }
+
+      blue.remember(blueState, blueIdx, rewardBlue, nextBlue, done);
+      red.remember(redState, redIdx, rewardRed, nextRed, done);
+      blue.learn(batchSize, gamma, alpha);
+      red.learn(batchSize, gamma, alpha);
+
+      if (done) {
         resetEpisode();
       }
     }
@@ -510,6 +591,7 @@
         { label: "Red wins", value: red.wins },
         { label: "Episodes", value: Math.max(blue.episodes, red.episodes) },
         { label: "Exploration", value: `ε = ${epsilon.toFixed(3)}` },
+        { label: "Replay size", value: `${blue.buffer.size}` },
       ];
       data.forEach((d) => {
         const card = document.createElement("div");
@@ -539,7 +621,9 @@
 
     document.getElementById("boost").addEventListener("click", () => {
       pulses.push({ x: red.x, y: red.y, r: 12, a: 0.6 });
-      red.q.update(red.state(blue), 0, 5, red.state(blue), gamma, alpha);
+      const state = red.state(blue);
+      red.remember(state, 0, 5, state, false);
+      red.learn(1, gamma, alpha);
     });
 
     // Add slight camera pulse on strong impacts
