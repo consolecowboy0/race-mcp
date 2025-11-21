@@ -224,6 +224,19 @@
 
     const ACTIONS = ["accelerate", "brake", "left", "right", "coast"];
 
+    function closingVelocity(self, opponent) {
+      const dx = opponent.x - self.x;
+      const dy = opponent.y - self.y;
+      const dist = Math.hypot(dx, dy) + 1e-5;
+      const selfVx = Math.cos(self.angle) * self.v;
+      const selfVy = Math.sin(self.angle) * self.v;
+      const oppVx = Math.cos(opponent.angle) * opponent.v;
+      const oppVy = Math.sin(opponent.angle) * opponent.v;
+      // negative dot means closing; flip sign so positive = closing speed
+      const relV = -(dx * (selfVx - oppVx) + dy * (selfVy - oppVy)) / dist;
+      return clamp(relV, -12, 12);
+    }
+
     function clamp(val, min, max) {
       return Math.max(min, Math.min(max, val));
     }
@@ -302,11 +315,29 @@
         const relAngle = Math.atan2(dy, dx);
         const angleDiff = ((relAngle - this.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
 
-        const distBin = bucket(dist, 5, Math.hypot(WORLD.w, WORLD.h));
+        const distBin = bucket(dist, 6, Math.hypot(WORLD.w, WORLD.h));
         const angBin = bucket(angleDiff + Math.PI, 8, Math.PI * 2);
-        const speedBin = bucket(Math.abs(this.v), 4, 9);
-        const oppSpeedBin = bucket(Math.abs(opponent.v), 4, 9);
-        return [distBin, angBin, speedBin, oppSpeedBin];
+        const speedBin = bucket(Math.abs(this.v), 5, 9);
+        const oppSpeedBin = bucket(Math.abs(opponent.v), 5, 9);
+
+        const closing = closingVelocity(this, opponent);
+        const closingBin = bucket(closing + 12, 6, 24);
+
+        const wallProximity = Math.min(
+          this.x - WORLD.margin,
+          WORLD.w - WORLD.margin - this.x,
+          this.y - WORLD.margin,
+          WORLD.h - WORLD.margin - this.y
+        );
+        const wallBin = bucket(wallProximity, 4, WORLD.margin + 10);
+
+        return [distBin, angBin, speedBin, oppSpeedBin, closingBin, wallBin];
+      }
+
+      qValues(stateKey) {
+        const qA = this.q1.get(stateKey);
+        const qB = this.q2.get(stateKey);
+        return qA.map((v, i) => v + qB[i]);
       }
 
       qValues(stateKey) {
@@ -392,6 +423,8 @@
     function handleCollisions() {
       let damageBlue = 0;
       let damageRed = 0;
+      let wallHitBlue = false;
+      let wallHitRed = false;
 
       // Wall collision
       [blue, red].forEach((car) => {
@@ -404,8 +437,13 @@
           car.health -= WORLD.wallDamage * Math.abs(car.v) * WORLD.dt * 3;
           car.x = clamp(car.x, minX, maxX);
           car.y = clamp(car.y, minY, maxY);
-          if (car === blue) damageBlue += WORLD.wallDamage;
-          else damageRed += WORLD.wallDamage;
+          if (car === blue) {
+            damageBlue += WORLD.wallDamage;
+            wallHitBlue = true;
+          } else {
+            damageRed += WORLD.wallDamage;
+            wallHitRed = true;
+          }
         }
       });
 
