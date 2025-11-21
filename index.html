@@ -216,13 +216,13 @@
       w: canvas.width,
       h: canvas.height,
       margin: 40,
-      wallDamage: 10,
-      friction: 0.97,
+      wallDamage: 14,
+      friction: 0.971,
       dt: 1 / 60,
       collisionRadius: 18,
     };
 
-    const ACTIONS = ["accelerate", "brake", "left", "right", "coast"];
+    const ACTIONS = ["accelerate", "brake", "left", "right", "coast", "look"];
 
     function closingVelocity(self, opponent) {
       const dx = opponent.x - self.x;
@@ -235,6 +235,12 @@
       // negative dot means closing; flip sign so positive = closing speed
       const relV = -(dx * (selfVx - oppVx) + dy * (selfVy - oppVy)) / dist;
       return clamp(relV, -12, 12);
+    }
+
+    function headingError(self, opponent) {
+      const desired = Math.atan2(opponent.y - self.y, opponent.x - self.x);
+      const diff = ((desired - self.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      return Math.abs(diff);
     }
 
     function clamp(val, min, max) {
@@ -261,8 +267,10 @@
       }
     }
 
+    const REPLAY_CAPACITY = 16000;
+
     class ReplayBuffer {
-      constructor(capacity = 4000) {
+      constructor(capacity = REPLAY_CAPACITY) {
         this.capacity = capacity;
         this.buffer = [];
       }
@@ -298,6 +306,7 @@
         this.q1 = new QTable();
         this.q2 = new QTable();
         this.buffer = new ReplayBuffer();
+        this.lockTimer = 0;
       }
 
       reset(x, y, angle) {
@@ -306,6 +315,7 @@
         this.angle = angle;
         this.v = 0;
         this.health = 100;
+        this.lockTimer = 0;
       }
 
       state(opponent) {
@@ -340,12 +350,6 @@
         return qA.map((v, i) => v + qB[i]);
       }
 
-      qValues(stateKey) {
-        const qA = this.q1.get(stateKey);
-        const qB = this.q2.get(stateKey);
-        return qA.map((v, i) => v + qB[i]);
-      }
-
       chooseAction(stateKey, epsilon) {
         const qs = this.qValues(stateKey);
         let actionIdx;
@@ -360,13 +364,23 @@
         return { action: ACTIONS[actionIdx], actionIdx };
       }
 
-      applyAction(action) {
-        const accel = 0.55;
+      lookAt(opponent) {
+        const desired = Math.atan2(opponent.y - this.y, opponent.x - this.x);
+        const diff = ((desired - this.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        const maxTurn = 0.18;
+        this.angle += clamp(diff, -maxTurn, maxTurn);
+        const aligned = Math.abs(diff) < 0.12;
+        this.lockTimer = aligned ? 60 : Math.max(this.lockTimer, 30);
+      }
+
+      applyAction(action, opponent) {
+        const accel = 0.55 * (1 + (this.lockTimer > 0 ? 0.2 : 0));
         const turn = 0.09;
         if (action === "accelerate") this.v += accel;
         if (action === "brake") this.v -= accel * 1.2;
         if (action === "left") this.angle -= turn;
         if (action === "right") this.angle += turn;
+        if (action === "look") this.lookAt(opponent);
         this.v = clamp(this.v, -6, 9);
       }
 
@@ -374,6 +388,10 @@
         this.x += Math.cos(this.angle) * this.v;
         this.y += Math.sin(this.angle) * this.v;
         this.v *= WORLD.friction;
+        if (this.lockTimer > 0) {
+          this.v += 0.04;
+          this.lockTimer -= 1;
+        }
       }
 
       remember(stateKey, actionIdx, reward, nextStateKey, done) {
@@ -413,18 +431,22 @@
     resetEpisode();
 
     let running = true;
-    let epsilon = 0.2;
-    const epsilonFloor = 0.01;
-    const decay = 0.9993;
-    const alpha = 0.22;
-    const gamma = 0.96;
-    const batchSize = 12;
+    let epsilon = 0.18;
+    const epsilonFloor = 0.02;
+    const decay = 0.9985;
+    const alpha = 0.26;
+    const gamma = 0.965;
+    const batchSize = 16;
+    const updatesPerStep = 2;
+    let lullFrames = 0;
+    let boostCountdown = 0;
 
     function handleCollisions() {
       let damageBlue = 0;
       let damageRed = 0;
       let wallHitBlue = false;
       let wallHitRed = false;
+      let impactEvent = null;
 
       // Wall collision
       [blue, red].forEach((car) => {
@@ -463,6 +485,16 @@
         blue.health -= impact * 0.6;
         red.health -= impact * 0.6;
 
+        impactEvent = {
+          x: (blue.x + red.x) / 2,
+          y: (blue.y + red.y) / 2,
+          impact,
+        };
+        if (impact > 6) {
+          pulses.push({ x: impactEvent.x, y: impactEvent.y, r: 10, a: 0.8 });
+          spawnSparks(impactEvent.x, impactEvent.y, impact);
+        }
+
         // attacker bonus goes to faster car
         if (blue.v > red.v) {
           red.health -= impact * 0.4;
@@ -472,7 +504,7 @@
           damageBlue += impact;
         }
       }
-      return { damageBlue, damageRed };
+      return { damageBlue, damageRed, wallHitBlue, wallHitRed, impactEvent };
     }
 
     function computeReward({
@@ -482,39 +514,90 @@
       nextDist,
       blueSpeed,
       redSpeed,
+      closingBlue,
+      closingRed,
+      headingBlue,
+      headingRed,
+      lockBlue,
+      lockRed,
     }) {
       const distanceGain = clamp(prevDist - nextDist, -40, 40);
-      const proximityShaping = distanceGain * 0.08;
-      const survivalBonus = 0.015;
-      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.25 ? -0.08 : 0;
-      const stallPenaltyRed = Math.abs(redSpeed) < 0.25 ? -0.08 : 0;
+      const proximityShaping = distanceGain * 0.11;
+      const closingBonusBlue = clamp(closingBlue, -10, 10) * 0.05;
+      const closingBonusRed = clamp(closingRed, -10, 10) * 0.05;
+      const survivalBonus = 0.02;
+      const driftPenaltyBlue = nextDist > prevDist ? -0.02 : 0;
+      const driftPenaltyRed = prevDist < nextDist ? -0.02 : 0;
+      const stallPenaltyBlue = Math.abs(blueSpeed) < 0.35 ? -0.12 : 0;
+      const stallPenaltyRed = Math.abs(redSpeed) < 0.35 ? -0.12 : 0;
+      const aimBonusBlue = clamp((Math.PI - headingBlue) / Math.PI, 0, 1) * 0.12;
+      const aimBonusRed = clamp((Math.PI - headingRed) / Math.PI, 0, 1) * 0.12;
+      const lockLiftBlue = lockBlue > 0 ? 0.05 : 0;
+      const lockLiftRed = lockRed > 0 ? 0.05 : 0;
 
       return {
-        rewardBlue: damageRed * 0.6 - damageBlue * 0.7 + proximityShaping + survivalBonus + stallPenaltyBlue,
-        rewardRed: damageBlue * 0.6 - damageRed * 0.7 - proximityShaping + survivalBonus + stallPenaltyRed,
+        rewardBlue:
+          damageRed * 0.6 -
+          damageBlue * 0.7 +
+          proximityShaping +
+          closingBonusBlue +
+          survivalBonus +
+          stallPenaltyBlue +
+          driftPenaltyBlue +
+          aimBonusBlue +
+          lockLiftBlue,
+        rewardRed:
+          damageBlue * 0.6 -
+          damageRed * 0.7 -
+          proximityShaping +
+          closingBonusRed +
+          survivalBonus +
+          stallPenaltyRed +
+          driftPenaltyRed +
+          aimBonusRed +
+          lockLiftRed,
       };
     }
 
-    function step() {
-      if (!running) return;
-      epsilon = Math.max(epsilonFloor, epsilon * decay);
+    function applyLullBoost() {
+      const impulse = 3.2;
+      [
+        [blue, red],
+        [red, blue],
+      ].forEach(([car, opponent]) => {
+        const desired = Math.atan2(opponent.y - car.y, opponent.x - car.x);
+        const diff = ((desired - car.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        car.angle += clamp(diff, -0.25, 0.25);
+        car.v = Math.max(car.v, 0) + impulse;
+        car.lockTimer = Math.max(car.lockTimer, 45);
+      });
+    }
+
+    function step(trainingOnly = false, epsilonOverride = null) {
+      if (!trainingOnly && !running) return;
+      if (epsilonOverride === null) {
+        epsilon = Math.max(epsilonFloor, epsilon * decay);
+      }
 
       const prevDist = Math.hypot(blue.x - red.x, blue.y - red.y);
       const blueState = blue.state(red);
       const redState = red.state(blue);
 
-      const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, epsilon);
-      const { action: redAction, actionIdx: redIdx } = red.chooseAction(redState, epsilon);
-      blue.applyAction(blueAction);
-      red.applyAction(redAction);
+      const explore = epsilonOverride ?? epsilon;
+      const { action: blueAction, actionIdx: blueIdx } = blue.chooseAction(blueState, explore);
+      const { action: redAction, actionIdx: redIdx } = red.chooseAction(redState, explore);
+      blue.applyAction(blueAction, red);
+      red.applyAction(redAction, blue);
 
       blue.move();
       red.move();
 
-      const { damageBlue, damageRed } = handleCollisions();
+      const { damageBlue, damageRed, wallHitBlue, wallHitRed, impactEvent } = handleCollisions();
       const nextBlue = blue.state(red);
       const nextRed = red.state(blue);
       const nextDist = Math.hypot(blue.x - red.x, blue.y - red.y);
+      const headingBlue = headingError(blue, red);
+      const headingRed = headingError(red, blue);
 
       let { rewardBlue, rewardRed } = computeReward({
         damageBlue,
@@ -523,7 +606,33 @@
         nextDist,
         blueSpeed: blue.v,
         redSpeed: red.v,
+        closingBlue: closingVelocity(blue, red),
+        closingRed: closingVelocity(red, blue),
+        headingBlue,
+        headingRed,
+        lockBlue: blue.lockTimer,
+        lockRed: red.lockTimer,
       });
+
+      const noImpact = damageBlue + damageRed < 0.5 && !wallHitBlue && !wallHitRed;
+      const spreading = nextDist > 160 && nextDist > prevDist;
+      const sluggish = Math.abs(blue.v) + Math.abs(red.v) < 2.5;
+
+      if (boostCountdown > 0) {
+        boostCountdown -= 1;
+        if (boostCountdown === 0) applyLullBoost();
+      }
+
+      if (noImpact && spreading && sluggish && boostCountdown === 0) {
+        lullFrames += 1;
+      } else if (!noImpact) {
+        lullFrames = 0;
+      }
+
+      if (lullFrames > 240) {
+        boostCountdown = 60;
+        lullFrames = 0;
+      }
 
       let done = false;
       if (blue.health <= 0 || red.health <= 0) {
@@ -541,8 +650,10 @@
 
       blue.remember(blueState, blueIdx, rewardBlue, nextBlue, done);
       red.remember(redState, redIdx, rewardRed, nextRed, done);
-      blue.learn(batchSize, gamma, alpha);
-      red.learn(batchSize, gamma, alpha);
+      for (let i = 0; i < updatesPerStep; i++) {
+        blue.learn(batchSize, gamma, alpha);
+        red.learn(batchSize, gamma, alpha);
+      }
 
       if (done) {
         resetEpisode();
@@ -576,10 +687,47 @@
       drawCar(blue);
       drawCar(red);
       drawDamagePulse();
+      drawSparks();
       ctx.restore();
     }
 
     const pulses = [];
+    const sparks = [];
+
+    function spawnSparks(x, y, intensity) {
+      const count = clamp(Math.floor(intensity / 2), 6, 22);
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 3 + intensity * 0.05;
+        sparks.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1,
+        });
+      }
+    }
+
+    function drawSparks() {
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const p = sparks[i];
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(250, 204, 21, ${p.life})`;
+        ctx.lineWidth = 2;
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 2, p.y - p.vy * 2);
+        ctx.stroke();
+
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.96;
+        p.vy *= 0.96;
+        p.life -= 0.02;
+        if (p.life <= 0) sparks.splice(i, 1);
+      }
+    }
+
     function drawDamagePulse() {
       pulses.forEach((p) => {
         ctx.beginPath();
@@ -629,7 +777,7 @@
         { label: "Red wins", value: red.wins },
         { label: "Episodes", value: Math.max(blue.episodes, red.episodes) },
         { label: "Exploration", value: `ε = ${epsilon.toFixed(3)}` },
-        { label: "Replay size", value: `${blue.buffer.size}` },
+        { label: "Replay size", value: `${blue.buffer.size} / ${REPLAY_CAPACITY}` },
       ];
       data.forEach((d) => {
         const card = document.createElement("div");
@@ -646,6 +794,17 @@
       requestAnimationFrame(loop);
     }
 
+    function warmupReplay(iterations = 420) {
+      resetEpisode();
+      for (let i = 0; i < iterations; i++) {
+        const annealed = 0.5 - (0.4 * i) / iterations; // start random, taper down
+        step(true, Math.max(0.08, annealed));
+      }
+      epsilon = Math.max(0.05, epsilon * Math.pow(decay, iterations));
+      resetEpisode();
+    }
+
+    warmupReplay();
     loop();
 
     document.getElementById("toggle").addEventListener("click", (e) => {
